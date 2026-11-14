@@ -40,7 +40,3 @@ This repository uses the official [`obs-plugintemplate`](https://github.com/obsp
 cmake --preset ubuntu-x86_64
 cmake --build --preset ubuntu-x86_64
 ```
-
-## StreamBeast Backend Endpoint
-
-See [`docs/streambeast-backend-endpoint.md`](docs/streambeast-backend-endpoint.md) for the Express `POST /api/srt/plugin-status` route for `streambeast.app`.
