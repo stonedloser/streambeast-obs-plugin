@@ -25,6 +25,7 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSpinBox;
+class QTabWidget;
 class QTimer;
 
 namespace streambeast {
@@ -41,8 +42,6 @@ public:
 	void refreshSceneAndSourceLists();
 
 	void saveConfig(obs_data_t *saveData, bool saving);
-	void toggleEnabledFromMenu();
-	bool isAutoSwitchEnabled() const { return config_.enabled; }
 
 private slots:
 	void onTick();
@@ -55,12 +54,16 @@ private slots:
 
 private:
 	void buildUi();
+	void buildMonitorTab(QTabWidget *tabs);
+	void buildSettingsTab(QTabWidget *tabs);
+	void connectUiSignals();
 	void applyConfigToUi();
 	void readConfigFromUi();
 	void saveGlobalConfigFile() const;
 	void loadGlobalConfigFile();
 	void applyObsDataToConfig(obs_data_t *data);
 	void writeConfigToObsData(obs_data_t *data) const;
+	int maxApiAgeMs() const;
 
 	MediaHealth sampleLocalMediaHealth(int64_t nowMs, bool &outFound,
 					   bool &outCloseWhenInactive,

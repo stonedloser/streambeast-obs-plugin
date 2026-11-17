@@ -117,6 +117,24 @@ private:
 	bool isManagedScene(const std::string &sceneName, const SwitcherConfig &cfg) const;
 	EffectiveFeed classifyFeed(const SignalSnapshot &snap, const SwitcherConfig &cfg,
 				   bool &outNeedsRestart) const;
+	void maybeRequestRestart(const SignalSnapshot &snap, const SwitcherConfig &cfg,
+				 SwitcherDecision &decision);
+	SwitcherDecision evaluateReturnFromFallback(const SignalSnapshot &snap,
+						    const SwitcherConfig &cfg,
+						    TargetSceneRole targetRole,
+						    const std::string &targetScene,
+						    bool needsRestart,
+						    const std::string &targetBadge,
+						    const std::string &recoveredSummary,
+						    const std::string &returningPrefix,
+						    const std::string &manualSummary);
+	SwitcherDecision evaluateDown(const SignalSnapshot &snap, const SwitcherConfig &cfg,
+				      bool onFallback, bool onLowBitrate, bool needsRestart);
+	SwitcherDecision evaluateLowBitrate(const SignalSnapshot &snap, const SwitcherConfig &cfg,
+					    bool onFallback, bool onLowBitrate, bool needsRestart);
+	SwitcherDecision evaluateHealthy(const SignalSnapshot &snap, const SwitcherConfig &cfg,
+					 bool onFallback, bool onLowBitrate, bool onLive,
+					 bool needsRestart);
 
 	int64_t downSinceMs_ = -1;
 	int64_t healthySinceMs_ = -1;

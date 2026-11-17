@@ -168,7 +168,7 @@ std::string extractStreamBeastKey(const std::string &input)
 		} else if (lowerVal.rfind("publish:", 0) == 0) {
 			val = val.substr(8);
 		}
-		// Match MediaMTX last-segment behavior in routes/srt.ts
+		// Extract the final path segment if a namespace prefix is present
 		size_t slashPos = val.rfind('/');
 		if (slashPos != std::string::npos) {
 			val = val.substr(slashPos + 1);
@@ -301,6 +301,201 @@ SrtSwitcherEngine::classifyFeed(const SignalSnapshot &snap, const SwitcherConfig
 	}
 }
 
+void SrtSwitcherEngine::maybeRequestRestart(const SignalSnapshot &snap, const SwitcherConfig &cfg,
+					      SwitcherDecision &decision)
+{
+	if (!cfg.autoRestartMediaSource || !snap.mediaSourceFound)
+		return;
+	if (lastRestartAttemptMs_ < 0 ||
+	    (snap.nowMs - lastRestartAttemptMs_) >= cfg.mediaRestartCooldownMs) {
+		decision.requestMediaRestart = true;
+		lastRestartAttemptMs_ = snap.nowMs;
+	}
+}
+
+SwitcherDecision SrtSwitcherEngine::evaluateReturnFromFallback(
+	const SignalSnapshot &snap, const SwitcherConfig &cfg, TargetSceneRole targetRole,
+	const std::string &targetScene, bool needsRestart, const std::string &targetBadge,
+	const std::string &recoveredSummary, const std::string &returningPrefix,
+	const std::string &manualSummary)
+{
+	SwitcherDecision decision;
+	if (!cfg.autoReturnToLive) {
+		healthySinceMs_ = -1;
+		decision.desiredRole = TargetSceneRole::Fallback;
+		decision.healthBadge = targetBadge;
+		decision.statusSummary = manualSummary;
+		return decision;
+	}
+
+	if (healthySinceMs_ < 0) {
+		healthySinceMs_ = snap.nowMs;
+	}
+	const int64_t elapsed = snap.nowMs - healthySinceMs_;
+	if (elapsed >= cfg.recoverDelayMs) {
+		decision.desiredRole = targetRole;
+		decision.switchToSceneName = targetScene;
+		if (needsRestart) {
+			maybeRequestRestart(snap, cfg, decision);
+		}
+		decision.healthBadge = targetBadge;
+		decision.statusSummary = recoveredSummary;
+	} else {
+		decision.desiredRole = TargetSceneRole::Fallback;
+		decision.healthBadge = "RECOVERING";
+		decision.statusSummary =
+			returningPrefix + formatRemainingSec(cfg.recoverDelayMs - elapsed);
+	}
+	return decision;
+}
+
+SwitcherDecision SrtSwitcherEngine::evaluateDown(const SignalSnapshot &snap,
+						 const SwitcherConfig &cfg, bool onFallback,
+						 bool onLowBitrate, bool needsRestart)
+{
+	SwitcherDecision decision;
+	healthySinceMs_ = -1;
+	lowBitrateSinceMs_ = -1;
+	lowBitrateRecoverSinceMs_ = -1;
+
+	if (needsRestart) {
+		maybeRequestRestart(snap, cfg, decision);
+	}
+
+	if (onFallback) {
+		downSinceMs_ = -1;
+		decision.desiredRole = TargetSceneRole::Fallback;
+		decision.healthBadge = "OFFLINE";
+		decision.statusSummary = "SRT offline — Fallback scene active";
+		return decision;
+	}
+
+	if (downSinceMs_ < 0) {
+		downSinceMs_ = snap.nowMs;
+	}
+	const int64_t elapsed = snap.nowMs - downSinceMs_;
+	if (elapsed >= cfg.dropDelayMs) {
+		decision.desiredRole = TargetSceneRole::Fallback;
+		decision.switchToSceneName = cfg.fallbackSceneName;
+		decision.healthBadge = "OFFLINE";
+		decision.statusSummary = "SRT dropped — switching to Fallback";
+	} else {
+		decision.desiredRole =
+			onLowBitrate ? TargetSceneRole::LowBitrate : TargetSceneRole::Live;
+		decision.healthBadge = "DROPPING";
+		decision.statusSummary = "SRT signal lost — switching in " +
+					 formatRemainingSec(cfg.dropDelayMs - elapsed);
+	}
+	return decision;
+}
+
+SwitcherDecision SrtSwitcherEngine::evaluateLowBitrate(const SignalSnapshot &snap,
+						       const SwitcherConfig &cfg, bool onFallback,
+						       bool onLowBitrate, bool needsRestart)
+{
+	downSinceMs_ = -1;
+	lowBitrateRecoverSinceMs_ = -1;
+
+	if (onFallback) {
+		return evaluateReturnFromFallback(snap, cfg, TargetSceneRole::LowBitrate,
+						  cfg.lowBitrateSceneName, needsRestart, "DEGRADED",
+						  "SRT recovered (low bitrate) — switching",
+						  "SRT live (low bitrate) — returning in ",
+						  "SRT live (low bitrate) — manual return");
+	}
+
+	SwitcherDecision decision;
+	healthySinceMs_ = -1;
+	if (onLowBitrate) {
+		lowBitrateSinceMs_ = -1;
+		decision.desiredRole = TargetSceneRole::LowBitrate;
+		decision.healthBadge = "DEGRADED";
+		if (snap.apiBitrateKbps > 0) {
+			decision.statusSummary = "Low bitrate (" +
+						 std::to_string(snap.apiBitrateKbps) + " kbps)";
+		} else {
+			decision.statusSummary = "Low bitrate / stalled signal";
+		}
+		return decision;
+	}
+
+	if (lowBitrateSinceMs_ < 0) {
+		lowBitrateSinceMs_ = snap.nowMs;
+	}
+	const int64_t elapsed = snap.nowMs - lowBitrateSinceMs_;
+	if (elapsed >= cfg.lowBitrateDelayMs) {
+		decision.desiredRole = TargetSceneRole::LowBitrate;
+		decision.switchToSceneName = cfg.lowBitrateSceneName;
+		decision.healthBadge = "DEGRADED";
+		decision.statusSummary = "Low bitrate — switching to warning scene";
+	} else {
+		decision.desiredRole = TargetSceneRole::Live;
+		decision.healthBadge = "DEGRADED";
+		decision.statusSummary = "Low bitrate — warning scene in " +
+					 formatRemainingSec(cfg.lowBitrateDelayMs - elapsed);
+	}
+	return decision;
+}
+
+SwitcherDecision SrtSwitcherEngine::evaluateHealthy(const SignalSnapshot &snap,
+						    const SwitcherConfig &cfg, bool onFallback,
+						    bool onLowBitrate, bool onLive,
+						    bool needsRestart)
+{
+	downSinceMs_ = -1;
+	lowBitrateSinceMs_ = -1;
+
+	if (onFallback) {
+		lowBitrateRecoverSinceMs_ = -1;
+		return evaluateReturnFromFallback(snap, cfg, TargetSceneRole::Live,
+						  cfg.liveSceneName, needsRestart, "LIVE",
+						  "SRT recovered — switching to Live",
+						  "SRT recovered — returning in ",
+						  "SRT is back live (manual return)");
+	}
+
+	SwitcherDecision decision;
+	healthySinceMs_ = -1;
+
+	if (onLowBitrate) {
+		if (lowBitrateRecoverSinceMs_ < 0) {
+			lowBitrateRecoverSinceMs_ = snap.nowMs;
+		}
+		const int64_t elapsed = snap.nowMs - lowBitrateRecoverSinceMs_;
+		if (elapsed >= cfg.recoverDelayMs) {
+			decision.desiredRole = TargetSceneRole::Live;
+			decision.switchToSceneName = cfg.liveSceneName;
+			decision.healthBadge = "LIVE";
+			decision.statusSummary = "Bitrate recovered — switching to Live";
+		} else {
+			decision.desiredRole = TargetSceneRole::LowBitrate;
+			decision.healthBadge = "RECOVERING";
+			decision.statusSummary = "Bitrate recovering — Live in " +
+						 formatRemainingSec(cfg.recoverDelayMs - elapsed);
+		}
+		return decision;
+	}
+
+	lowBitrateRecoverSinceMs_ = -1;
+	if (!onLive && cfg.autoReturnToLive) {
+		decision.desiredRole = TargetSceneRole::Live;
+		decision.switchToSceneName = cfg.liveSceneName;
+		decision.healthBadge = "LIVE";
+		decision.statusSummary = "SRT healthy — switching to Live";
+		return decision;
+	}
+
+	decision.desiredRole = TargetSceneRole::Live;
+	decision.healthBadge = "LIVE";
+	if (snap.apiConfigured && snap.apiReachable && snap.apiBitrateKbps > 0) {
+		decision.statusSummary =
+			"SRT Live (" + std::to_string(snap.apiBitrateKbps) + " kbps)";
+	} else {
+		decision.statusSummary = "SRT Live";
+	}
+	return decision;
+}
+
 SwitcherDecision SrtSwitcherEngine::evaluate(const SignalSnapshot &snap, const SwitcherConfig &cfg)
 {
 	SwitcherDecision decision;
@@ -339,7 +534,7 @@ SwitcherDecision SrtSwitcherEngine::evaluate(const SignalSnapshot &snap, const S
 	if (feed == EffectiveFeed::Unconfigured) {
 		resetTimers();
 		decision.healthBadge = "SETUP";
-		decision.statusSummary = "Select an SRT Media Source or Stream Key";
+		decision.statusSummary = "Select a StreamBeast SRT Media Source or Stream Key";
 		return decision;
 	}
 
@@ -348,196 +543,17 @@ SwitcherDecision SrtSwitcherEngine::evaluate(const SignalSnapshot &snap, const S
 				  snap.currentSceneName == cfg.lowBitrateSceneName;
 	const bool onLive = snap.currentSceneName == cfg.liveSceneName;
 
-	auto maybeRequestRestart = [&]() {
-		if (!cfg.autoRestartMediaSource || !snap.mediaSourceFound)
-			return;
-		if (lastRestartAttemptMs_ < 0 ||
-		    (snap.nowMs - lastRestartAttemptMs_) >= cfg.mediaRestartCooldownMs) {
-			decision.requestMediaRestart = true;
-			lastRestartAttemptMs_ = snap.nowMs;
-		}
-	};
-
-	if (feed == EffectiveFeed::Down) {
-		healthySinceMs_ = -1;
-		lowBitrateSinceMs_ = -1;
-		lowBitrateRecoverSinceMs_ = -1;
-
-		if (needsRestart) {
-			maybeRequestRestart();
-		}
-
-		if (onFallback) {
-			downSinceMs_ = -1;
-			decision.desiredRole = TargetSceneRole::Fallback;
-			decision.healthBadge = "OFFLINE";
-			decision.statusSummary = "SRT offline — Fallback scene active";
-			return decision;
-		}
-
-		if (downSinceMs_ < 0) {
-			downSinceMs_ = snap.nowMs;
-		}
-		const int64_t elapsed = snap.nowMs - downSinceMs_;
-		if (elapsed >= cfg.dropDelayMs) {
-			decision.desiredRole = TargetSceneRole::Fallback;
-			decision.switchToSceneName = cfg.fallbackSceneName;
-			decision.healthBadge = "OFFLINE";
-			decision.statusSummary = "SRT dropped — switching to Fallback";
-		} else {
-			decision.desiredRole = onLowBitrate ? TargetSceneRole::LowBitrate
-							    : TargetSceneRole::Live;
-			decision.healthBadge = "DROPPING";
-			decision.statusSummary = "SRT signal lost — switching in " +
-						 formatRemainingSec(cfg.dropDelayMs - elapsed);
-		}
+	switch (feed) {
+	case EffectiveFeed::Down:
+		return evaluateDown(snap, cfg, onFallback, onLowBitrate, needsRestart);
+	case EffectiveFeed::LowBitrate:
+		return evaluateLowBitrate(snap, cfg, onFallback, onLowBitrate, needsRestart);
+	case EffectiveFeed::Healthy:
+		return evaluateHealthy(snap, cfg, onFallback, onLowBitrate, onLive, needsRestart);
+	case EffectiveFeed::Unconfigured:
+	default:
 		return decision;
 	}
-
-	if (feed == EffectiveFeed::LowBitrate) {
-		downSinceMs_ = -1;
-		lowBitrateRecoverSinceMs_ = -1;
-
-		if (onFallback) {
-			if (!cfg.autoReturnToLive) {
-				healthySinceMs_ = -1;
-				decision.desiredRole = TargetSceneRole::Fallback;
-				decision.healthBadge = "DEGRADED";
-				decision.statusSummary = "SRT live (low bitrate) — manual return";
-				return decision;
-			}
-			if (healthySinceMs_ < 0) {
-				healthySinceMs_ = snap.nowMs;
-			}
-			const int64_t elapsed = snap.nowMs - healthySinceMs_;
-			if (elapsed >= cfg.recoverDelayMs) {
-				decision.desiredRole = TargetSceneRole::LowBitrate;
-				decision.switchToSceneName = cfg.lowBitrateSceneName;
-				if (needsRestart) {
-					maybeRequestRestart();
-				}
-				decision.healthBadge = "DEGRADED";
-				decision.statusSummary = "SRT recovered (low bitrate) — switching";
-			} else {
-				decision.desiredRole = TargetSceneRole::Fallback;
-				decision.healthBadge = "RECOVERING";
-				decision.statusSummary =
-					"SRT live (low bitrate) — returning in " +
-					formatRemainingSec(cfg.recoverDelayMs - elapsed);
-			}
-			return decision;
-		}
-
-		healthySinceMs_ = -1;
-		if (onLowBitrate) {
-			lowBitrateSinceMs_ = -1;
-			decision.desiredRole = TargetSceneRole::LowBitrate;
-			decision.healthBadge = "DEGRADED";
-			if (snap.apiBitrateKbps > 0) {
-				decision.statusSummary = "Low bitrate (" +
-							 std::to_string(snap.apiBitrateKbps) +
-							 " kbps)";
-			} else {
-				decision.statusSummary = "Low bitrate / stalled signal";
-			}
-			return decision;
-		}
-
-		if (lowBitrateSinceMs_ < 0) {
-			lowBitrateSinceMs_ = snap.nowMs;
-		}
-		const int64_t elapsed = snap.nowMs - lowBitrateSinceMs_;
-		if (elapsed >= cfg.lowBitrateDelayMs) {
-			decision.desiredRole = TargetSceneRole::LowBitrate;
-			decision.switchToSceneName = cfg.lowBitrateSceneName;
-			decision.healthBadge = "DEGRADED";
-			decision.statusSummary = "Low bitrate — switching to warning scene";
-		} else {
-			decision.desiredRole = TargetSceneRole::Live;
-			decision.healthBadge = "DEGRADED";
-			decision.statusSummary =
-				"Low bitrate — warning scene in " +
-				formatRemainingSec(cfg.lowBitrateDelayMs - elapsed);
-		}
-		return decision;
-	}
-
-	// EffectiveFeed::Healthy
-	downSinceMs_ = -1;
-	lowBitrateSinceMs_ = -1;
-
-	if (onFallback) {
-		lowBitrateRecoverSinceMs_ = -1;
-		if (!cfg.autoReturnToLive) {
-			healthySinceMs_ = -1;
-			decision.desiredRole = TargetSceneRole::Fallback;
-			decision.healthBadge = "LIVE";
-			decision.statusSummary = "SRT is back live (manual return)";
-			return decision;
-		}
-		if (healthySinceMs_ < 0) {
-			healthySinceMs_ = snap.nowMs;
-		}
-		const int64_t elapsed = snap.nowMs - healthySinceMs_;
-		if (elapsed >= cfg.recoverDelayMs) {
-			decision.desiredRole = TargetSceneRole::Live;
-			decision.switchToSceneName = cfg.liveSceneName;
-			if (needsRestart) {
-				maybeRequestRestart();
-			}
-			decision.healthBadge = "LIVE";
-			decision.statusSummary = "SRT recovered — switching to Live";
-		} else {
-			decision.desiredRole = TargetSceneRole::Fallback;
-			decision.healthBadge = "RECOVERING";
-			decision.statusSummary = "SRT recovered — returning in " +
-						 formatRemainingSec(cfg.recoverDelayMs - elapsed);
-		}
-		return decision;
-	}
-
-	healthySinceMs_ = -1;
-
-	if (onLowBitrate) {
-		if (lowBitrateRecoverSinceMs_ < 0) {
-			lowBitrateRecoverSinceMs_ = snap.nowMs;
-		}
-		const int64_t elapsed = snap.nowMs - lowBitrateRecoverSinceMs_;
-		if (elapsed >= cfg.recoverDelayMs) {
-			decision.desiredRole = TargetSceneRole::Live;
-			decision.switchToSceneName = cfg.liveSceneName;
-			decision.healthBadge = "LIVE";
-			decision.statusSummary = "Bitrate recovered — switching to Live";
-		} else {
-			decision.desiredRole = TargetSceneRole::LowBitrate;
-			decision.healthBadge = "RECOVERING";
-			decision.statusSummary = "Bitrate recovering — Live in " +
-						 formatRemainingSec(cfg.recoverDelayMs - elapsed);
-		}
-		return decision;
-	}
-
-	lowBitrateRecoverSinceMs_ = -1;
-	if (!onLive) {
-		// Unreachable unless onlySwitchManagedScenes is false and user is on another scene
-		if (cfg.autoReturnToLive) {
-			decision.desiredRole = TargetSceneRole::Live;
-			decision.switchToSceneName = cfg.liveSceneName;
-			decision.healthBadge = "LIVE";
-			decision.statusSummary = "SRT healthy — switching to Live";
-			return decision;
-		}
-	}
-
-	decision.desiredRole = TargetSceneRole::Live;
-	decision.healthBadge = "LIVE";
-	if (snap.apiConfigured && snap.apiReachable && snap.apiBitrateKbps > 0) {
-		decision.statusSummary =
-			"SRT Live (" + std::to_string(snap.apiBitrateKbps) + " kbps)";
-	} else {
-		decision.statusSummary = "SRT Live";
-	}
-	return decision;
 }
 
 } // namespace streambeast

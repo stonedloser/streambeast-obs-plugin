@@ -33,6 +33,7 @@ the Free Software Foundation; either version 2 of the License, or
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace streambeast {
@@ -150,7 +151,13 @@ void SwitcherDock::buildUi()
 	auto *tabs = new QTabWidget(this);
 	rootLayout->addWidget(tabs);
 
-	// ── Tab 1: Monitor & Scenes ───────────────────────────────────────────────
+	buildMonitorTab(tabs);
+	buildSettingsTab(tabs);
+	connectUiSignals();
+}
+
+void SwitcherDock::buildMonitorTab(QTabWidget *tabs)
+{
 	auto *monitorScroll = new QScrollArea(tabs);
 	monitorScroll->setWidgetResizable(true);
 	monitorScroll->setFrameShape(QFrame::NoFrame);
@@ -248,12 +255,21 @@ void SwitcherDock::buildUi()
 	actionsRow->addWidget(liveBtn);
 	actionsRow->addWidget(fallbackBtn);
 	monLayout->addLayout(actionsRow);
+
+	auto *bridgeNote = new QLabel(
+		QStringLiteral("Built exclusively for StreamBeast OBS Bridge (streambeast.app)"),
+		monitorPage);
+	bridgeNote->setWordWrap(true);
+	bridgeNote->setStyleSheet(QStringLiteral("QLabel { color: #9ca3af; font-size: 11px; }"));
+	monLayout->addWidget(bridgeNote);
 	monLayout->addStretch(1);
 
 	monitorScroll->setWidget(monitorPage);
 	tabs->addTab(monitorScroll, QStringLiteral("Monitor"));
+}
 
-	// ── Tab 2: Settings & StreamBeast API ────────────────────────────────────
+void SwitcherDock::buildSettingsTab(QTabWidget *tabs)
+{
 	auto *settingsScroll = new QScrollArea(tabs);
 	settingsScroll->setWidgetResizable(true);
 	settingsScroll->setFrameShape(QFrame::NoFrame);
@@ -318,7 +334,8 @@ void SwitcherDock::buildUi()
 	setLayout->addWidget(lowBrBox);
 
 	// StreamBeast API settings
-	auto *apiBox = new QGroupBox(QStringLiteral("StreamBeast API Telemetry"), settingsPage);
+	auto *apiBox =
+		new QGroupBox(QStringLiteral("StreamBeast OBS Bridge Telemetry"), settingsPage);
 	auto *apiLayout = new QVBoxLayout(apiBox);
 
 	useApiCheck_ =
@@ -332,7 +349,8 @@ void SwitcherDock::buildUi()
 	auto *keyRow = new QHBoxLayout();
 	streamKeyEdit_ = new QLineEdit(apiBox);
 	streamKeyEdit_->setEchoMode(QLineEdit::Password);
-	streamKeyEdit_->setPlaceholderText(QStringLiteral("Auto-detected from SRT Media Source"));
+	streamKeyEdit_->setPlaceholderText(
+		QStringLiteral("Auto-detected from StreamBeast SRT Source"));
 	showKeyBtn_ = new QPushButton(QStringLiteral("Show"), apiBox);
 	showKeyBtn_->setCheckable(true);
 	connect(showKeyBtn_, &QPushButton::toggled, this, [this](bool shown) {
@@ -379,8 +397,10 @@ void SwitcherDock::buildUi()
 
 	settingsScroll->setWidget(settingsPage);
 	tabs->addTab(settingsScroll, QStringLiteral("Settings"));
+}
 
-	// Wire change signals
+void SwitcherDock::connectUiSignals()
+{
 	connect(mediaSourceCombo_, &QComboBox::currentTextChanged, this,
 		&SwitcherDock::onUiConfigChanged);
 	connect(liveSceneCombo_, &QComboBox::currentTextChanged, this,
@@ -435,11 +455,6 @@ void SwitcherDock::onObsExiting()
 		tickTimer_->stop();
 	}
 	apiClient_->stop();
-}
-
-void SwitcherDock::toggleEnabledFromMenu()
-{
-	enableToggleBtn_->setChecked(!config_.enabled);
 }
 
 void SwitcherDock::refreshSceneAndSourceLists()
@@ -571,13 +586,17 @@ void SwitcherDock::readConfigFromUi()
 	config_.lowBitrateSceneName =
 		lowBitrateSceneCombo_->currentData().toString().toStdString();
 
-	config_.dropDelayMs = static_cast<int>(dropDelaySpin_->value() * 1000.0);
-	config_.recoverDelayMs = static_cast<int>(recoverDelaySpin_->value() * 1000.0);
-	config_.mediaStallTimeoutMs = static_cast<int>(stallTimeoutSpin_->value() * 1000.0);
-	config_.mediaRestartCooldownMs = static_cast<int>(restartCooldownSpin_->value() * 1000.0);
+	config_.dropDelayMs = static_cast<int>(std::lround(dropDelaySpin_->value() * 1000.0));
+	config_.recoverDelayMs =
+		static_cast<int>(std::lround(recoverDelaySpin_->value() * 1000.0));
+	config_.mediaStallTimeoutMs =
+		static_cast<int>(std::lround(stallTimeoutSpin_->value() * 1000.0));
+	config_.mediaRestartCooldownMs =
+		static_cast<int>(std::lround(restartCooldownSpin_->value() * 1000.0));
 
 	config_.lowBitrateKbps = lowBitrateThresholdSpin_->value();
-	config_.lowBitrateDelayMs = static_cast<int>(lowBitrateDelaySpin_->value() * 1000.0);
+	config_.lowBitrateDelayMs =
+		static_cast<int>(std::lround(lowBitrateDelaySpin_->value() * 1000.0));
 	config_.lowBitrateRecoverHysteresisKbps = lowBitrateHysteresisSpin_->value();
 
 	config_.useStreamBeastApi = useApiCheck_->isChecked();
@@ -873,6 +892,11 @@ void SwitcherDock::restartObsMediaSource()
 	lastMediaAdvanceMs_ = -1;
 }
 
+int SwitcherDock::maxApiAgeMs() const
+{
+	return std::max(10000, config_.apiPollIntervalMs * 4);
+}
+
 void SwitcherDock::reconfigureApiClient(const std::string &effectiveKey)
 {
 	if (!obsReady_ || obsExiting_)
@@ -902,9 +926,9 @@ void SwitcherDock::onTick()
 
 	reconfigureApiClient(effectiveKey);
 
-	const int maxApiAgeMs = std::max(10000, config_.apiPollIntervalMs * 4);
 	const ApiTelemetrySnapshot &apiSnap = apiClient_->latestSnapshot();
-	const bool apiFresh = apiClient_->isConfigured() && apiClient_->isFresh(nowMs, maxApiAgeMs);
+	const bool apiFresh =
+		apiClient_->isConfigured() && apiClient_->isFresh(nowMs, maxApiAgeMs());
 
 	SignalSnapshot snap;
 	snap.nowMs = nowMs;
@@ -960,7 +984,6 @@ void SwitcherDock::updateStatusUi(const SwitcherDecision &decision, MediaHealth 
 	}
 
 	const int64_t nowMs = QDateTime::currentMSecsSinceEpoch();
-	const int maxApiAgeMs = std::max(10000, config_.apiPollIntervalMs * 4);
 	const ApiTelemetrySnapshot &apiSnap = apiClient_->latestSnapshot();
 
 	if (!config_.useStreamBeastApi) {
@@ -968,8 +991,8 @@ void SwitcherDock::updateStatusUi(const SwitcherDecision &decision, MediaHealth 
 			QStringLiteral("StreamBeast API: Disabled (local OBS mode)"));
 	} else if (effectiveKey.empty()) {
 		telemetryLabel_->setText(
-			QStringLiteral("StreamBeast API: Waiting for SRT key"));
-	} else if (!apiClient_->isFresh(nowMs, maxApiAgeMs)) {
+			QStringLiteral("StreamBeast API: Waiting for StreamBeast SRT key"));
+	} else if (!apiClient_->isFresh(nowMs, maxApiAgeMs())) {
 		if (!apiSnap.errorMessage.isEmpty()) {
 			telemetryLabel_->setText(
 				QStringLiteral("StreamBeast API: %1").arg(apiSnap.errorMessage));
@@ -1002,6 +1025,11 @@ void SwitcherDock::updateStatusUi(const SwitcherDecision &decision, MediaHealth 
 		tipLabel_->setText(QStringLiteral(
 			"Tip: Uncheck 'Close file when inactive' in your Media Source "
 			"or enable StreamBeast API so recovery can be detected while on Fallback."));
+		tipLabel_->setVisible(true);
+	} else if (mediaFound && effectiveKey.empty() && config_.useStreamBeastApi) {
+		tipLabel_->setText(QStringLiteral(
+			"No StreamBeast OBS Bridge key detected. This plugin only works with "
+			"the OBS Bridge from streambeast.app (or paste your key in Settings)."));
 		tipLabel_->setVisible(true);
 	} else {
 		tipLabel_->setVisible(false);
@@ -1047,7 +1075,8 @@ void SwitcherDock::onTestApiClicked()
 
 	testApiBtn_->setEnabled(false);
 	apiStatusLabel_->setText(QStringLiteral("Testing..."));
-	apiClient_->configure(true, QString::fromStdString(config_.apiBaseUrl),
+	apiClient_->configure(config_.useStreamBeastApi,
+			      QString::fromStdString(config_.apiBaseUrl),
 			      QString::fromStdString(effectiveKey), config_.apiPollIntervalMs);
 	apiClient_->pollNow(true);
 }
@@ -1062,12 +1091,16 @@ void SwitcherDock::onManualLiveClicked()
 {
 	readConfigFromUi();
 	switchObsScene(config_.liveSceneName);
+	engine_.reset();
+	onTick();
 }
 
 void SwitcherDock::onManualFallbackClicked()
 {
 	readConfigFromUi();
 	switchObsScene(config_.fallbackSceneName);
+	engine_.reset();
+	onTick();
 }
 
 } // namespace streambeast

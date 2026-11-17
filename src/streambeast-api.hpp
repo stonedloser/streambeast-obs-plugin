@@ -58,6 +58,7 @@ private slots:
 	void onPollTimer();
 
 private:
+	void abortInFlightReply();
 	void handleReply(QNetworkReply *reply, bool isManualTest);
 
 	QNetworkAccessManager *nam_ = nullptr;

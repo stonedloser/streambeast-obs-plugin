@@ -11,6 +11,8 @@ the Free Software Foundation; either version 2 of the License, or
 #include "streambeast-api.hpp"
 #include "switcher-core.hpp"
 
+#include <plugin-support.h>
+
 #include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -65,16 +67,22 @@ void StreamBeastApiClient::configure(bool enabled, const QString &baseUrl, const
 	}
 }
 
+void StreamBeastApiClient::abortInFlightReply()
+{
+	if (!inFlightReply_)
+		return;
+	inFlightReply_->disconnect(this);
+	inFlightReply_->abort();
+	inFlightReply_->deleteLater();
+	inFlightReply_ = nullptr;
+}
+
 void StreamBeastApiClient::stop()
 {
 	if (pollTimer_->isActive()) {
 		pollTimer_->stop();
 	}
-	if (inFlightReply_) {
-		inFlightReply_->abort();
-		inFlightReply_->deleteLater();
-		inFlightReply_ = nullptr;
-	}
+	abortInFlightReply();
 }
 
 bool StreamBeastApiClient::isFresh(int64_t nowMs, int maxAgeMs) const
@@ -108,9 +116,7 @@ void StreamBeastApiClient::pollNow(bool isManualTest)
 	if (inFlightReply_) {
 		if (!isManualTest)
 			return;
-		inFlightReply_->abort();
-		inFlightReply_->deleteLater();
-		inFlightReply_ = nullptr;
+		abortInFlightReply();
 	}
 
 	const QUrl url(baseUrl_ + QStringLiteral("/api/srt/plugin-status"));
@@ -127,7 +133,8 @@ void StreamBeastApiClient::pollNow(bool isManualTest)
 	QNetworkRequest req(url);
 	req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
 	req.setHeader(QNetworkRequest::UserAgentHeader,
-		      QStringLiteral("StreamBeast-OBS-Switcher/1.0.0"));
+		      QStringLiteral("StreamBeast-OBS-Switcher/%1")
+			      .arg(QString::fromUtf8(PLUGIN_VERSION)));
 	req.setTransferTimeout(3000);
 
 	QJsonObject body;
