@@ -1,5 +1,5 @@
 /*
-StreamBeast SRT Switcher
+StreamBeast IRL
 Copyright (C) 2026 StreamBeast (https://streambeast.app)
 
 This program is free software; you can redistribute it and/or modify
@@ -38,6 +38,16 @@ void onFrontendEvent(enum obs_frontend_event event, void *)
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_RENAMED:
 		g_dock->refreshSceneAndSourceLists();
+		g_dock->onObsStateChanged();
+		break;
+	case OBS_FRONTEND_EVENT_SCENE_CHANGED:
+	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
+	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
+	case OBS_FRONTEND_EVENT_RECORDING_STARTED:
+	case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
+	case OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED:
+	case OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED:
+		g_dock->onObsStateChanged();
 		break;
 	case OBS_FRONTEND_EVENT_EXIT:
 		g_dock->onObsExiting();
@@ -78,7 +88,7 @@ bool obs_module_load(void)
 	g_dock = new streambeast::SwitcherDock();
 	if (!obs_frontend_add_dock_by_id(kDockId, obs_module_text("StreamBeast.DockTitle"),
 					 g_dock)) {
-		obs_log(LOG_ERROR, "Failed to register StreamBeast SRT Switcher dock");
+		obs_log(LOG_ERROR, "Failed to register StreamBeast IRL dock");
 		delete g_dock;
 		g_dock = nullptr;
 		return false;

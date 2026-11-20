@@ -37,8 +37,8 @@
         }
     },
     "name": "streambeast-srt-switcher",
-    "displayName": "StreamBeast SRT Switcher",
-    "version": "1.0.0",
+    "displayName": "StreamBeast IRL",
+    "version": "1.2.0",
     "author": "StreamBeast",
     "website": "https://streambeast.app",
     "email": "support@streambeast.app"

@@ -1,5 +1,5 @@
 /*
-StreamBeast SRT Switcher
+StreamBeast IRL
 Copyright (C) 2026 StreamBeast (https://streambeast.app)
 
 This program is free software; you can redistribute it and/or modify
@@ -18,10 +18,16 @@ the Free Software Foundation; either version 2 of the License, or
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDir>
+#include <QDirIterator>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -124,7 +130,9 @@ QString badgeStyleFor(const std::string &badge)
 SwitcherDock::SwitcherDock(QWidget *parent)
 	: QWidget(parent),
 	  apiClient_(new StreamBeastApiClient(this)),
-	  tickTimer_(new QTimer(this))
+	  obsRemoteClient_(new ObsRemoteClient(this)),
+	  tickTimer_(new QTimer(this)),
+	  cpuUsageInfo_(os_cpu_usage_info_start())
 {
 	buildUi();
 	loadGlobalConfigFile();
@@ -132,6 +140,17 @@ SwitcherDock::SwitcherDock(QWidget *parent)
 
 	connect(apiClient_, &StreamBeastApiClient::telemetryUpdated, this,
 		&SwitcherDock::onTelemetryUpdated);
+	connect(obsRemoteClient_, &ObsRemoteClient::connectionChanged, this,
+		&SwitcherDock::onObsRemoteConnectionChanged);
+	connect(obsRemoteClient_, &ObsRemoteClient::tokenTested, this,
+		&SwitcherDock::onObsRemoteTokenTested);
+	connect(obsRemoteClient_, &ObsRemoteClient::commandReceived, this,
+		&SwitcherDock::onObsRemoteCommandReceived);
+	connect(obsRemoteClient_, &ObsRemoteClient::configReloadRequested, this, [this]() {
+		if (obsReady_ && !obsExiting_) {
+			pushObsRemoteState(QDateTime::currentMSecsSinceEpoch());
+		}
+	});
 
 	tickTimer_->setInterval(500);
 	connect(tickTimer_, &QTimer::timeout, this, &SwitcherDock::onTick);
@@ -140,6 +159,10 @@ SwitcherDock::SwitcherDock(QWidget *parent)
 SwitcherDock::~SwitcherDock()
 {
 	onObsExiting();
+	if (cpuUsageInfo_) {
+		os_cpu_usage_info_destroy(cpuUsageInfo_);
+		cpuUsageInfo_ = nullptr;
+	}
 }
 
 void SwitcherDock::buildUi()
@@ -151,24 +174,25 @@ void SwitcherDock::buildUi()
 	auto *tabs = new QTabWidget(this);
 	rootLayout->addWidget(tabs);
 
-	buildMonitorTab(tabs);
-	buildSettingsTab(tabs);
+	buildAutoSceneTab(tabs);
+	buildClipsTab(tabs);
+	buildObsRemoteTab(tabs);
 	connectUiSignals();
 }
 
-void SwitcherDock::buildMonitorTab(QTabWidget *tabs)
+void SwitcherDock::buildAutoSceneTab(QTabWidget *tabs)
 {
-	auto *monitorScroll = new QScrollArea(tabs);
-	monitorScroll->setWidgetResizable(true);
-	monitorScroll->setFrameShape(QFrame::NoFrame);
+	auto *autoSceneScroll = new QScrollArea(tabs);
+	autoSceneScroll->setWidgetResizable(true);
+	autoSceneScroll->setFrameShape(QFrame::NoFrame);
 
-	auto *monitorPage = new QWidget(monitorScroll);
-	auto *monLayout = new QVBoxLayout(monitorPage);
+	auto *autoScenePage = new QWidget(autoSceneScroll);
+	auto *monLayout = new QVBoxLayout(autoScenePage);
 	monLayout->setContentsMargins(6, 6, 6, 6);
 	monLayout->setSpacing(8);
 
 	// Status card
-	auto *statusBox = new QGroupBox(QStringLiteral("SRT Feed Status"), monitorPage);
+	auto *statusBox = new QGroupBox(QStringLiteral("SRT Feed Status"), autoScenePage);
 	auto *statusLayout = new QVBoxLayout(statusBox);
 	statusLayout->setSpacing(5);
 
@@ -193,6 +217,11 @@ void SwitcherDock::buildMonitorTab(QTabWidget *tabs)
 	telemetryLabel_->setWordWrap(true);
 	statusLayout->addWidget(telemetryLabel_);
 
+	clipMonitorLabel_ = new QLabel(statusBox);
+	clipMonitorLabel_->setWordWrap(true);
+	clipMonitorLabel_->setVisible(false);
+	statusLayout->addWidget(clipMonitorLabel_);
+
 	tipLabel_ = new QLabel(statusBox);
 	tipLabel_->setWordWrap(true);
 	tipLabel_->setStyleSheet(QStringLiteral("QLabel { color: #facc15; font-size: 11px; }"));
@@ -216,7 +245,7 @@ void SwitcherDock::buildMonitorTab(QTabWidget *tabs)
 	monLayout->addWidget(statusBox);
 
 	// Routing & Sources card
-	auto *routingBox = new QGroupBox(QStringLiteral("Source & Scene Mapping"), monitorPage);
+	auto *routingBox = new QGroupBox(QStringLiteral("Source & Scene Mapping"), autoScenePage);
 	auto *routingForm = new QFormLayout(routingBox);
 	routingForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
 	routingForm->setSpacing(6);
@@ -245,9 +274,9 @@ void SwitcherDock::buildMonitorTab(QTabWidget *tabs)
 
 	// Manual actions
 	auto *actionsRow = new QHBoxLayout();
-	auto *restartBtn = new QPushButton(QStringLiteral("Restart SRT"), monitorPage);
-	auto *liveBtn = new QPushButton(QStringLiteral("Go Live"), monitorPage);
-	auto *fallbackBtn = new QPushButton(QStringLiteral("Go Fallback"), monitorPage);
+	auto *restartBtn = new QPushButton(QStringLiteral("Restart SRT"), autoScenePage);
+	auto *liveBtn = new QPushButton(QStringLiteral("Go Live"), autoScenePage);
+	auto *fallbackBtn = new QPushButton(QStringLiteral("Go Fallback"), autoScenePage);
 	connect(restartBtn, &QPushButton::clicked, this, &SwitcherDock::onRestartSourceClicked);
 	connect(liveBtn, &QPushButton::clicked, this, &SwitcherDock::onManualLiveClicked);
 	connect(fallbackBtn, &QPushButton::clicked, this, &SwitcherDock::onManualFallbackClicked);
@@ -256,29 +285,136 @@ void SwitcherDock::buildMonitorTab(QTabWidget *tabs)
 	actionsRow->addWidget(fallbackBtn);
 	monLayout->addLayout(actionsRow);
 
+	buildAutoSceneSettings(autoScenePage, monLayout);
+
 	auto *bridgeNote = new QLabel(
 		QStringLiteral("Built exclusively for StreamBeast OBS Bridge (streambeast.app)"),
-		monitorPage);
+		autoScenePage);
 	bridgeNote->setWordWrap(true);
 	bridgeNote->setStyleSheet(QStringLiteral("QLabel { color: #9ca3af; font-size: 11px; }"));
 	monLayout->addWidget(bridgeNote);
 	monLayout->addStretch(1);
 
-	monitorScroll->setWidget(monitorPage);
-	tabs->addTab(monitorScroll, QStringLiteral("Monitor"));
+	autoSceneScroll->setWidget(autoScenePage);
+	tabs->addTab(autoSceneScroll, QStringLiteral("Auto Scene"));
 }
 
-void SwitcherDock::buildSettingsTab(QTabWidget *tabs)
+void SwitcherDock::buildClipsTab(QTabWidget *tabs)
 {
-	auto *settingsScroll = new QScrollArea(tabs);
-	settingsScroll->setWidgetResizable(true);
-	settingsScroll->setFrameShape(QFrame::NoFrame);
+	auto *clipsScroll = new QScrollArea(tabs);
+	clipsScroll->setWidgetResizable(true);
+	clipsScroll->setFrameShape(QFrame::NoFrame);
 
-	auto *settingsPage = new QWidget(settingsScroll);
-	auto *setLayout = new QVBoxLayout(settingsPage);
-	setLayout->setContentsMargins(6, 6, 6, 6);
-	setLayout->setSpacing(8);
+	auto *clipsPage = new QWidget(clipsScroll);
+	auto *clipsLayout = new QVBoxLayout(clipsPage);
+	clipsLayout->setContentsMargins(6, 6, 6, 6);
+	clipsLayout->setSpacing(8);
 
+	// Setup instructions at the top
+	auto *setupGuideBox = new QGroupBox(QStringLiteral("Setup"), clipsPage);
+	auto *setupGuideLayout = new QVBoxLayout(setupGuideBox);
+	auto *clipsHint = new QLabel(
+		QStringLiteral("1. Select a Media Source on your Fallback / BRB scene (or click "
+			       "Create to add one automatically).\n"
+			       "2. Browse for your folder of clips (.mp4, .mkv, .mov, .webm, "
+			       ".flv, .ts, .avi, etc.).\n"
+			       "3. Turn Random Clips ON below to play clips when disconnected."),
+		setupGuideBox);
+	clipsHint->setWordWrap(true);
+	clipsHint->setStyleSheet(QStringLiteral("QLabel { font-size: 11px; }"));
+	setupGuideLayout->addWidget(clipsHint);
+	clipsLayout->addWidget(setupGuideBox);
+
+	// Status & toggle card
+	auto *playerBox = new QGroupBox(QStringLiteral("Random Clip Player"), clipsPage);
+	auto *playerLayout = new QVBoxLayout(playerBox);
+	playerLayout->setSpacing(6);
+
+	clipEnabledToggleBtn_ = new QPushButton(QStringLiteral("Random Clips: OFF"), playerBox);
+	clipEnabledToggleBtn_->setCheckable(true);
+	clipEnabledToggleBtn_->setChecked(false);
+	connect(clipEnabledToggleBtn_, &QPushButton::toggled, this, [this](bool checked) {
+		if (updatingUi_)
+			return;
+		config_.clipPlayerEnabled = checked;
+		clipEnabledToggleBtn_->setText(checked ? QStringLiteral("Random Clips: ON")
+						       : QStringLiteral("Random Clips: OFF"));
+		saveGlobalConfigFile();
+		if (obsReady_) {
+			onTick();
+		} else {
+			updateClipStatusUi();
+		}
+	});
+	playerLayout->addWidget(clipEnabledToggleBtn_);
+
+	clipStatusLabel_ = new QLabel(QStringLiteral("Status: Disabled"), playerBox);
+	clipStatusLabel_->setWordWrap(true);
+	playerLayout->addWidget(clipStatusLabel_);
+
+	auto *clipActionsRow = new QHBoxLayout();
+	nextClipBtn_ = new QPushButton(QStringLiteral("Play Next Clip"), playerBox);
+	rescanClipsBtn_ = new QPushButton(QStringLiteral("Rescan Folder"), playerBox);
+	connect(nextClipBtn_, &QPushButton::clicked, this, &SwitcherDock::onNextClipClicked);
+	connect(rescanClipsBtn_, &QPushButton::clicked, this, &SwitcherDock::onRescanClipsClicked);
+	clipActionsRow->addWidget(nextClipBtn_);
+	clipActionsRow->addWidget(rescanClipsBtn_);
+	playerLayout->addLayout(clipActionsRow);
+	clipsLayout->addWidget(playerBox);
+
+	// Source & folder card
+	auto *setupBox = new QGroupBox(QStringLiteral("Clip Source & Directory"), clipsPage);
+	auto *setupForm = new QFormLayout(setupBox);
+	setupForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+	setupForm->setSpacing(6);
+
+	auto *clipSourceRow = new QHBoxLayout();
+	clipSourceCombo_ = new QComboBox(setupBox);
+	clipSourceCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+	clipSourceCombo_->setToolTip(
+		QStringLiteral("OBS Media Source in your Fallback / BRB scene that plays clips"));
+	createClipSourceBtn_ = new QPushButton(QStringLiteral("Create"), setupBox);
+	createClipSourceBtn_->setToolTip(QStringLiteral(
+		"Create a new Media Source for Random Clips and add it to your Fallback scene"));
+	connect(createClipSourceBtn_, &QPushButton::clicked, this,
+		&SwitcherDock::onCreateClipSourceClicked);
+	clipSourceRow->addWidget(clipSourceCombo_, 1);
+	clipSourceRow->addWidget(createClipSourceBtn_);
+	setupForm->addRow(QStringLiteral("Clip Media Source:"), clipSourceRow);
+
+	auto *dirRow = new QHBoxLayout();
+	clipDirEdit_ = new QLineEdit(setupBox);
+	clipDirEdit_->setPlaceholderText(QStringLiteral("Select folder containing video clips"));
+	browseClipDirBtn_ = new QPushButton(QStringLiteral("Browse..."), setupBox);
+	connect(browseClipDirBtn_, &QPushButton::clicked, this,
+		&SwitcherDock::onBrowseClipDirClicked);
+	dirRow->addWidget(clipDirEdit_, 1);
+	dirRow->addWidget(browseClipDirBtn_);
+	setupForm->addRow(QStringLiteral("Clips Folder:"), dirRow);
+	clipsLayout->addWidget(setupBox);
+
+	// Playback options card
+	auto *optsBox = new QGroupBox(QStringLiteral("Playback Options"), clipsPage);
+	auto *optsLayout = new QVBoxLayout(optsBox);
+
+	clipShuffleCheck_ =
+		new QCheckBox(QStringLiteral("Shuffle all clips before repeating"), optsBox);
+	clipSubfoldersCheck_ = new QCheckBox(QStringLiteral("Include subfolders"), optsBox);
+	clipOnlyFallbackCheck_ = new QCheckBox(
+		QStringLiteral("Only play while on Fallback / BRB scene"), optsBox);
+
+	optsLayout->addWidget(clipShuffleCheck_);
+	optsLayout->addWidget(clipSubfoldersCheck_);
+	optsLayout->addWidget(clipOnlyFallbackCheck_);
+	clipsLayout->addWidget(optsBox);
+	clipsLayout->addStretch(1);
+
+	clipsScroll->setWidget(clipsPage);
+	tabs->addTab(clipsScroll, QStringLiteral("Random Clips"));
+}
+
+void SwitcherDock::buildAutoSceneSettings(QWidget *settingsPage, QVBoxLayout *setLayout)
+{
 	// Timings
 	auto *timingBox = new QGroupBox(QStringLiteral("Detection Timings"), settingsPage);
 	auto *timingForm = new QFormLayout(timingBox);
@@ -393,10 +529,100 @@ void SwitcherDock::buildSettingsTab(QTabWidget *tabs)
 	safetyLayout->addWidget(autoReturnCheck_);
 	safetyLayout->addWidget(autoRestartCheck_);
 	setLayout->addWidget(safetyBox);
-	setLayout->addStretch(1);
+}
 
-	settingsScroll->setWidget(settingsPage);
-	tabs->addTab(settingsScroll, QStringLiteral("Settings"));
+void SwitcherDock::buildObsRemoteTab(QTabWidget *tabs)
+{
+	auto *remoteScroll = new QScrollArea(tabs);
+	remoteScroll->setWidgetResizable(true);
+	remoteScroll->setFrameShape(QFrame::NoFrame);
+
+	auto *remotePage = new QWidget(remoteScroll);
+	auto *remoteLayout = new QVBoxLayout(remotePage);
+	remoteLayout->setContentsMargins(6, 6, 6, 6);
+	remoteLayout->setSpacing(8);
+
+	// Setup instructions at top
+	auto *setupGuideBox = new QGroupBox(QStringLiteral("Setup"), remotePage);
+	auto *setupGuideLayout = new QVBoxLayout(setupGuideBox);
+	auto *guideLabel = new QLabel(
+		QStringLiteral("1. Copy your OBS Browser Source Overlay URL from "
+			       "streambeast.app/tools/obs-remote.\n"
+			       "2. Paste the Overlay URL below.\n"
+			       "3. Turn OBS Remote ON — no Browser Source or WebSocket password "
+			       "needed."),
+		setupGuideBox);
+	guideLabel->setWordWrap(true);
+	guideLabel->setStyleSheet(QStringLiteral("QLabel { font-size: 11px; }"));
+	setupGuideLayout->addWidget(guideLabel);
+	remoteLayout->addWidget(setupGuideBox);
+
+	// Bridge status & toggle card
+	auto *bridgeBox = new QGroupBox(QStringLiteral("OBS Remote Bridge"), remotePage);
+	auto *bridgeLayout = new QVBoxLayout(bridgeBox);
+	bridgeLayout->setSpacing(6);
+
+	obsRemoteToggleBtn_ = new QPushButton(QStringLiteral("OBS Remote: OFF"), bridgeBox);
+	obsRemoteToggleBtn_->setCheckable(true);
+	obsRemoteToggleBtn_->setChecked(false);
+	connect(obsRemoteToggleBtn_, &QPushButton::toggled, this, [this](bool checked) {
+		if (updatingUi_)
+			return;
+		readConfigFromUi();
+		config_.obsRemoteEnabled = checked;
+		obsRemoteToggleBtn_->setText(checked ? QStringLiteral("OBS Remote: ON")
+						     : QStringLiteral("OBS Remote: OFF"));
+		saveGlobalConfigFile();
+		reconfigureObsRemoteClient();
+		if (obsReady_ && checked) {
+			pushObsRemoteState(QDateTime::currentMSecsSinceEpoch());
+		}
+		updateObsRemoteStatusUi();
+	});
+	bridgeLayout->addWidget(obsRemoteToggleBtn_);
+
+	obsRemoteStatusLabel_ = new QLabel(QStringLiteral("Status: Disabled"), bridgeBox);
+	obsRemoteStatusLabel_->setWordWrap(true);
+	bridgeLayout->addWidget(obsRemoteStatusLabel_);
+
+	auto *testRow = new QHBoxLayout();
+	testObsRemoteBtn_ = new QPushButton(QStringLiteral("Test Connection"), bridgeBox);
+	obsRemoteTestLabel_ = new QLabel(QStringLiteral("Not tested"), bridgeBox);
+	obsRemoteTestLabel_->setWordWrap(true);
+	connect(testObsRemoteBtn_, &QPushButton::clicked, this,
+		&SwitcherDock::onTestObsRemoteClicked);
+	testRow->addWidget(testObsRemoteBtn_);
+	testRow->addWidget(obsRemoteTestLabel_, 1);
+	bridgeLayout->addLayout(testRow);
+	remoteLayout->addWidget(bridgeBox);
+
+	// Overlay URL card
+	auto *credsBox = new QGroupBox(QStringLiteral("OBS Overlay URL"), remotePage);
+	auto *credsForm = new QFormLayout(credsBox);
+	credsForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+	credsForm->setSpacing(6);
+
+	auto *tokenRow = new QHBoxLayout();
+	obsRemoteTokenEdit_ = new QLineEdit(credsBox);
+	obsRemoteTokenEdit_->setEchoMode(QLineEdit::Password);
+	obsRemoteTokenEdit_->setPlaceholderText(
+		QStringLiteral("https://streambeast.app/overlay/obs-remote?token=..."));
+	obsRemoteShowTokenBtn_ = new QPushButton(QStringLiteral("Show"), credsBox);
+	obsRemoteShowTokenBtn_->setCheckable(true);
+	connect(obsRemoteShowTokenBtn_, &QPushButton::toggled, this, [this](bool shown) {
+		obsRemoteTokenEdit_->setEchoMode(shown ? QLineEdit::Normal : QLineEdit::Password);
+		obsRemoteShowTokenBtn_->setText(shown ? QStringLiteral("Hide")
+						      : QStringLiteral("Show"));
+	});
+	tokenRow->addWidget(obsRemoteTokenEdit_, 1);
+	tokenRow->addWidget(obsRemoteShowTokenBtn_);
+	credsForm->addRow(QStringLiteral("Overlay URL:"), tokenRow);
+
+	remoteLayout->addWidget(credsBox);
+	remoteLayout->addStretch(1);
+
+	remoteScroll->setWidget(remotePage);
+	tabs->addTab(remoteScroll, QStringLiteral("OBS Remote"));
 }
 
 void SwitcherDock::connectUiSignals()
@@ -434,6 +660,17 @@ void SwitcherDock::connectUiSignals()
 		&SwitcherDock::onUiConfigChanged);
 	connect(autoReturnCheck_, &QCheckBox::toggled, this, &SwitcherDock::onUiConfigChanged);
 	connect(autoRestartCheck_, &QCheckBox::toggled, this, &SwitcherDock::onUiConfigChanged);
+
+	connect(clipSourceCombo_, &QComboBox::currentTextChanged, this,
+		&SwitcherDock::onUiConfigChanged);
+	connect(clipDirEdit_, &QLineEdit::editingFinished, this, &SwitcherDock::onUiConfigChanged);
+	connect(clipShuffleCheck_, &QCheckBox::toggled, this, &SwitcherDock::onUiConfigChanged);
+	connect(clipSubfoldersCheck_, &QCheckBox::toggled, this, &SwitcherDock::onUiConfigChanged);
+	connect(clipOnlyFallbackCheck_, &QCheckBox::toggled, this,
+		&SwitcherDock::onUiConfigChanged);
+
+	connect(obsRemoteTokenEdit_, &QLineEdit::editingFinished, this,
+		&SwitcherDock::onUiConfigChanged);
 }
 
 void SwitcherDock::onObsFinishedLoading()
@@ -444,7 +681,17 @@ void SwitcherDock::onObsFinishedLoading()
 	if (!tickTimer_->isActive()) {
 		tickTimer_->start();
 	}
+	reconfigureObsRemoteClient();
 	onTick();
+}
+
+void SwitcherDock::onObsStateChanged()
+{
+	if (!obsReady_ || obsExiting_)
+		return;
+	if (obsRemoteClient_->isConfigured()) {
+		pushObsRemoteState(QDateTime::currentMSecsSinceEpoch());
+	}
 }
 
 void SwitcherDock::onObsExiting()
@@ -455,6 +702,7 @@ void SwitcherDock::onObsExiting()
 		tickTimer_->stop();
 	}
 	apiClient_->stop();
+	obsRemoteClient_->stop();
 }
 
 void SwitcherDock::refreshSceneAndSourceLists()
@@ -465,9 +713,10 @@ void SwitcherDock::refreshSceneAndSourceLists()
 	updatingUi_ = true;
 	{
 		QSignalBlocker b1(mediaSourceCombo_);
-		QSignalBlocker b2(liveSceneCombo_);
-		QSignalBlocker b3(fallbackSceneCombo_);
-		QSignalBlocker b4(lowBitrateSceneCombo_);
+		QSignalBlocker b2(clipSourceCombo_);
+		QSignalBlocker b3(liveSceneCombo_);
+		QSignalBlocker b4(fallbackSceneCombo_);
+		QSignalBlocker b5(lowBitrateSceneCombo_);
 
 		std::vector<SourceListItem> sources;
 		obs_enum_sources(enumMediaSourcesProc, &sources);
@@ -479,6 +728,9 @@ void SwitcherDock::refreshSceneAndSourceLists()
 		mediaSourceCombo_->clear();
 		mediaSourceCombo_->addItem(QStringLiteral("(None)"), QString());
 
+		clipSourceCombo_->clear();
+		clipSourceCombo_->addItem(QStringLiteral("(None)"), QString());
+
 		std::string firstStreamBeastSource;
 		for (const auto &item : sources) {
 			QString qName = QString::fromStdString(item.name);
@@ -486,6 +738,9 @@ void SwitcherDock::refreshSceneAndSourceLists()
 						? (qName + QStringLiteral(" [StreamBeast SRT]"))
 						: qName;
 			mediaSourceCombo_->addItem(label, qName);
+			if (!item.isStreamBeast) {
+				clipSourceCombo_->addItem(qName, qName);
+			}
 			if (item.isStreamBeast && firstStreamBeastSource.empty()) {
 				firstStreamBeastSource = item.name;
 			}
@@ -495,14 +750,18 @@ void SwitcherDock::refreshSceneAndSourceLists()
 			config_.mediaSourceName = firstStreamBeastSource;
 		}
 
-		int srcIdx = mediaSourceCombo_->findData(
-			QString::fromStdString(config_.mediaSourceName));
-		if (srcIdx < 0 && !config_.mediaSourceName.empty()) {
-			QString qSaved = QString::fromStdString(config_.mediaSourceName);
-			mediaSourceCombo_->addItem(qSaved + QStringLiteral(" (Missing)"), qSaved);
-			srcIdx = mediaSourceCombo_->count() - 1;
-		}
-		mediaSourceCombo_->setCurrentIndex(std::max(0, srcIdx));
+		auto selectSource = [](QComboBox *combo, const std::string &target) {
+			int idx = combo->findData(QString::fromStdString(target));
+			if (idx < 0 && !target.empty()) {
+				QString qSaved = QString::fromStdString(target);
+				combo->addItem(qSaved + QStringLiteral(" (Missing)"), qSaved);
+				idx = combo->count() - 1;
+			}
+			combo->setCurrentIndex(std::max(0, idx));
+		};
+
+		selectSource(mediaSourceCombo_, config_.mediaSourceName);
+		selectSource(clipSourceCombo_, config_.clipSourceName);
 
 		// Scenes
 		liveSceneCombo_->clear();
@@ -572,9 +831,37 @@ void SwitcherDock::applyConfigToUi()
 		onlyManagedScenesCheck_->setChecked(config_.onlySwitchManagedScenes);
 		autoReturnCheck_->setChecked(config_.autoReturnToLive);
 		autoRestartCheck_->setChecked(config_.autoRestartMediaSource);
+
+		QSignalBlocker bClipToggle(clipEnabledToggleBtn_);
+		clipEnabledToggleBtn_->setChecked(config_.clipPlayerEnabled);
+		clipEnabledToggleBtn_->setText(config_.clipPlayerEnabled
+						       ? QStringLiteral("Random Clips: ON")
+						       : QStringLiteral("Random Clips: OFF"));
+		clipDirEdit_->setText(QString::fromStdString(config_.clipDirectory));
+		clipShuffleCheck_->setChecked(config_.clipShuffleNoRepeat);
+		clipSubfoldersCheck_->setChecked(config_.clipIncludeSubfolders);
+		clipOnlyFallbackCheck_->setChecked(config_.clipOnlyOnFallbackScene);
+
+		QSignalBlocker bRemoteToggle(obsRemoteToggleBtn_);
+		obsRemoteToggleBtn_->setChecked(config_.obsRemoteEnabled);
+		obsRemoteToggleBtn_->setText(config_.obsRemoteEnabled
+						     ? QStringLiteral("OBS Remote: ON")
+						     : QStringLiteral("OBS Remote: OFF"));
+		if (!config_.obsRemoteToken.empty()) {
+			obsRemoteTokenEdit_->setText(
+				QStringLiteral("%1/overlay/obs-remote?token=%2")
+					.arg(QString::fromStdString(config_.apiBaseUrl),
+					     QString::fromStdString(config_.obsRemoteToken)));
+		} else {
+			obsRemoteTokenEdit_->clear();
+		}
 	}
 	updatingUi_ = false;
 	refreshSceneAndSourceLists();
+	rescanClipDirectory();
+	updateClipStatusUi();
+	reconfigureObsRemoteClient();
+	updateObsRemoteStatusUi();
 }
 
 void SwitcherDock::readConfigFromUi()
@@ -607,6 +894,17 @@ void SwitcherDock::readConfigFromUi()
 	config_.onlySwitchManagedScenes = onlyManagedScenesCheck_->isChecked();
 	config_.autoReturnToLive = autoReturnCheck_->isChecked();
 	config_.autoRestartMediaSource = autoRestartCheck_->isChecked();
+
+	config_.clipPlayerEnabled = clipEnabledToggleBtn_->isChecked();
+	config_.clipSourceName = clipSourceCombo_->currentData().toString().toStdString();
+	config_.clipDirectory = clipDirEdit_->text().trimmed().toUtf8().toStdString();
+	config_.clipShuffleNoRepeat = clipShuffleCheck_->isChecked();
+	config_.clipIncludeSubfolders = clipSubfoldersCheck_->isChecked();
+	config_.clipOnlyOnFallbackScene = clipOnlyFallbackCheck_->isChecked();
+
+	config_.obsRemoteEnabled = obsRemoteToggleBtn_->isChecked();
+	config_.obsRemoteToken =
+		extractObsRemoteToken(obsRemoteTokenEdit_->text().toStdString());
 }
 
 void SwitcherDock::onUiConfigChanged()
@@ -614,10 +912,18 @@ void SwitcherDock::onUiConfigChanged()
 	if (updatingUi_)
 		return;
 	readConfigFromUi();
+	if (config_.clipDirectory != scannedClipDir_ ||
+	    config_.clipIncludeSubfolders != scannedClipSubfolders_) {
+		rescanClipDirectory();
+	}
 	engine_.reset();
 	saveGlobalConfigFile();
+	reconfigureObsRemoteClient();
 	if (obsReady_) {
 		onTick();
+	} else {
+		updateClipStatusUi();
+		updateObsRemoteStatusUi();
 	}
 }
 
@@ -645,6 +951,16 @@ void SwitcherDock::writeConfigToObsData(obs_data_t *data) const
 	obs_data_set_int(data, "low_bitrate_delay_ms", config_.lowBitrateDelayMs);
 	obs_data_set_int(data, "low_bitrate_hysteresis_kbps",
 			 config_.lowBitrateRecoverHysteresisKbps);
+
+	obs_data_set_bool(data, "clip_player_enabled", config_.clipPlayerEnabled);
+	obs_data_set_string(data, "clip_source", config_.clipSourceName.c_str());
+	obs_data_set_string(data, "clip_directory", config_.clipDirectory.c_str());
+	obs_data_set_bool(data, "clip_shuffle_no_repeat", config_.clipShuffleNoRepeat);
+	obs_data_set_bool(data, "clip_include_subfolders", config_.clipIncludeSubfolders);
+	obs_data_set_bool(data, "clip_only_on_fallback", config_.clipOnlyOnFallbackScene);
+
+	obs_data_set_bool(data, "obs_remote_enabled", config_.obsRemoteEnabled);
+	obs_data_set_string(data, "obs_remote_token", config_.obsRemoteToken.c_str());
 }
 
 void SwitcherDock::applyObsDataToConfig(obs_data_t *data)
@@ -700,6 +1016,24 @@ void SwitcherDock::applyObsDataToConfig(obs_data_t *data)
 	if (obs_data_has_user_value(data, "low_bitrate_hysteresis_kbps"))
 		config_.lowBitrateRecoverHysteresisKbps =
 			static_cast<int>(obs_data_get_int(data, "low_bitrate_hysteresis_kbps"));
+
+	if (obs_data_has_user_value(data, "clip_player_enabled"))
+		config_.clipPlayerEnabled = obs_data_get_bool(data, "clip_player_enabled");
+	if (obs_data_has_user_value(data, "clip_source"))
+		config_.clipSourceName = getStr("clip_source");
+	if (obs_data_has_user_value(data, "clip_directory"))
+		config_.clipDirectory = getStr("clip_directory");
+	if (obs_data_has_user_value(data, "clip_shuffle_no_repeat"))
+		config_.clipShuffleNoRepeat = obs_data_get_bool(data, "clip_shuffle_no_repeat");
+	if (obs_data_has_user_value(data, "clip_include_subfolders"))
+		config_.clipIncludeSubfolders = obs_data_get_bool(data, "clip_include_subfolders");
+	if (obs_data_has_user_value(data, "clip_only_on_fallback"))
+		config_.clipOnlyOnFallbackScene = obs_data_get_bool(data, "clip_only_on_fallback");
+
+	if (obs_data_has_user_value(data, "obs_remote_enabled"))
+		config_.obsRemoteEnabled = obs_data_get_bool(data, "obs_remote_enabled");
+	if (obs_data_has_user_value(data, "obs_remote_token"))
+		config_.obsRemoteToken = extractObsRemoteToken(getStr("obs_remote_token"));
 }
 
 void SwitcherDock::saveGlobalConfigFile() const
@@ -758,6 +1092,14 @@ void SwitcherDock::saveConfig(obs_data_t *saveData, bool saving)
 		engine_.reset();
 		lastMediaTime_ = -1;
 		lastMediaAdvanceMs_ = -1;
+		clipSelector_.reset();
+		scannedClipDir_.clear();
+		wasClipTargetActive_ = false;
+		lastClipLoadMs_ = -1;
+		lastClipErrorMs_ = -1;
+		clipConsecutiveErrors_ = 0;
+		currentClipName_.clear();
+		lastClipError_.clear();
 		applyConfigToUi();
 	}
 }
@@ -948,9 +1290,11 @@ void SwitcherDock::onTick()
 		restartObsMediaSource();
 	}
 
+	std::string activeScene = snap.currentSceneName;
 	if (!decision.switchToSceneName.empty() &&
 	    decision.switchToSceneName != snap.currentSceneName) {
 		switchObsScene(decision.switchToSceneName);
+		activeScene = decision.switchToSceneName;
 	}
 
 	if (decision.statusSummary != lastLogSummary_) {
@@ -959,7 +1303,12 @@ void SwitcherDock::onTick()
 			decision.statusSummary.c_str());
 	}
 
+	updateClipPlayer(nowMs, activeScene);
 	updateStatusUi(decision, localHealth, mediaFound, closeWhenInactive, effectiveKey);
+
+	if (obsRemoteClient_->isConfigured() && (nowMs - lastRemotePushMs_) >= 2500) {
+		pushObsRemoteState(nowMs);
+	}
 }
 
 void SwitcherDock::updateStatusUi(const SwitcherDecision &decision, MediaHealth localHealth,
@@ -1101,6 +1450,691 @@ void SwitcherDock::onManualFallbackClicked()
 	switchObsScene(config_.fallbackSceneName);
 	engine_.reset();
 	onTick();
+}
+
+void SwitcherDock::rescanClipDirectory()
+{
+	scannedClipDir_ = config_.clipDirectory;
+	scannedClipSubfolders_ = config_.clipIncludeSubfolders;
+
+	std::vector<std::string> found;
+	if (!config_.clipDirectory.empty()) {
+		const QString dirPath = QString::fromStdString(config_.clipDirectory);
+		const QDir dir(dirPath);
+		if (dir.exists()) {
+			const QDirIterator::IteratorFlags flags =
+				config_.clipIncludeSubfolders ? QDirIterator::Subdirectories
+							      : QDirIterator::NoIteratorFlags;
+			QDirIterator it(dirPath, QDir::Files | QDir::Readable, flags);
+			while (it.hasNext()) {
+				const QString filePath = it.next();
+				const std::string utf8Path =
+					QFileInfo(filePath).absoluteFilePath().toUtf8().toStdString();
+				if (isSupportedVideoExtension(utf8Path)) {
+					found.push_back(utf8Path);
+				}
+			}
+		}
+	}
+
+	clipSelector_.setClips(std::move(found));
+}
+
+bool SwitcherDock::playNextRandomClip(int64_t nowMs, bool forcePlay)
+{
+	if (obsExiting_)
+		return false;
+
+	if (config_.clipSourceName.empty()) {
+		lastClipError_ = "Select or create a Clip Media Source first";
+		return false;
+	}
+	if (config_.clipSourceName == config_.mediaSourceName) {
+		lastClipError_ = "Clip Media Source cannot be the same as the SRT Media Source";
+		return false;
+	}
+	if (config_.clipDirectory.empty()) {
+		lastClipError_ = "Select a Clips Folder first";
+		return false;
+	}
+
+	if (clipSelector_.clipCount() == 0) {
+		rescanClipDirectory();
+		if (clipSelector_.clipCount() == 0) {
+			currentClipName_.clear();
+			lastClipError_ = "No video clips found in folder";
+			return false;
+		}
+	}
+
+	obs_source_t *source = obs_get_source_by_name(config_.clipSourceName.c_str());
+	if (!source) {
+		lastClipError_ = "Clip Media Source not found";
+		return false;
+	}
+
+	const std::string clipPath = clipSelector_.pickNext(config_.clipShuffleNoRepeat);
+	if (clipPath.empty()) {
+		obs_source_release(source);
+		return false;
+	}
+
+	obs_data_t *settings = obs_source_get_settings(source);
+	if (!settings) {
+		settings = obs_data_create();
+	}
+	obs_data_set_bool(settings, "is_local_file", true);
+	obs_data_set_string(settings, "local_file", clipPath.c_str());
+	obs_data_set_bool(settings, "looping", false);
+	obs_data_set_bool(settings, "restart_on_activate", false);
+	obs_source_update(source, settings);
+	obs_data_release(settings);
+
+	if (forcePlay) {
+		obs_source_media_restart(source);
+	}
+	obs_source_release(source);
+
+	currentClipName_ = QFileInfo(QString::fromStdString(clipPath)).fileName().toStdString();
+	lastClipLoadMs_ = nowMs;
+	lastClipError_.clear();
+	obs_log(LOG_INFO, "Playing BRB clip: %s", currentClipName_.c_str());
+	return true;
+}
+
+void SwitcherDock::stopClipMediaSource()
+{
+	if (config_.clipSourceName.empty() || obsExiting_ ||
+	    config_.clipSourceName == config_.mediaSourceName) {
+		return;
+	}
+
+	obs_source_t *source = obs_get_source_by_name(config_.clipSourceName.c_str());
+	if (source) {
+		obs_source_media_stop(source);
+		obs_source_release(source);
+	}
+	lastClipLoadMs_ = -1;
+	lastClipErrorMs_ = -1;
+	clipConsecutiveErrors_ = 0;
+	currentClipName_.clear();
+}
+
+void SwitcherDock::updateClipPlayer(int64_t nowMs, const std::string &currentSceneName)
+{
+	const bool onFallback = !config_.fallbackSceneName.empty() &&
+				currentSceneName == config_.fallbackSceneName;
+
+	if (!config_.clipPlayerEnabled || config_.clipSourceName.empty() ||
+	    config_.clipDirectory.empty()) {
+		if (wasClipTargetActive_) {
+			stopClipMediaSource();
+			wasClipTargetActive_ = false;
+		}
+		lastClipError_.clear();
+		updateClipStatusUi();
+		return;
+	}
+
+	if (config_.clipSourceName == config_.mediaSourceName) {
+		lastClipError_ = "Clip Media Source cannot be the same as the SRT Media Source";
+		wasClipTargetActive_ = false;
+		updateClipStatusUi();
+		return;
+	}
+
+	obs_source_t *clipSource = obs_get_source_by_name(config_.clipSourceName.c_str());
+	if (!clipSource) {
+		lastClipError_ = "Selected Clip Media Source not found";
+		wasClipTargetActive_ = false;
+		updateClipStatusUi();
+		return;
+	}
+
+	const bool sourceActive = obs_source_active(clipSource);
+	const bool shouldBeActive = config_.clipOnlyOnFallbackScene ? onFallback : sourceActive;
+
+	if (!shouldBeActive) {
+		if (wasClipTargetActive_) {
+			obs_source_media_stop(clipSource);
+			lastClipLoadMs_ = -1;
+			lastClipErrorMs_ = -1;
+			clipConsecutiveErrors_ = 0;
+			currentClipName_.clear();
+			wasClipTargetActive_ = false;
+		}
+		obs_source_release(clipSource);
+		updateClipStatusUi();
+		return;
+	}
+
+	if (!wasClipTargetActive_) {
+		obs_source_release(clipSource);
+		rescanClipDirectory();
+		clipConsecutiveErrors_ = 0;
+		lastClipError_.clear();
+		if (playNextRandomClip(nowMs, true)) {
+			wasClipTargetActive_ = true;
+		}
+		updateClipStatusUi();
+		return;
+	}
+
+	const enum obs_media_state state = obs_source_media_get_state(clipSource);
+	obs_source_release(clipSource);
+
+	switch (state) {
+	case OBS_MEDIA_STATE_PLAYING:
+		clipConsecutiveErrors_ = 0;
+		lastClipError_.clear();
+		break;
+
+	case OBS_MEDIA_STATE_OPENING:
+	case OBS_MEDIA_STATE_BUFFERING:
+	case OBS_MEDIA_STATE_PAUSED:
+		break;
+
+	case OBS_MEDIA_STATE_ENDED:
+		clipConsecutiveErrors_ = 0;
+		playNextRandomClip(nowMs, true);
+		break;
+
+	case OBS_MEDIA_STATE_ERROR:
+		++clipConsecutiveErrors_;
+		if (clipSelector_.clipCount() > 0 &&
+		    clipConsecutiveErrors_ <= static_cast<int>(clipSelector_.clipCount())) {
+			if (lastClipErrorMs_ < 0 || (nowMs - lastClipErrorMs_) >= 1500) {
+				lastClipErrorMs_ = nowMs;
+				playNextRandomClip(nowMs, true);
+			}
+		} else {
+			lastClipError_ = "Unable to play clips in selected folder";
+		}
+		break;
+
+	case OBS_MEDIA_STATE_STOPPED:
+	case OBS_MEDIA_STATE_NONE:
+	default:
+		if (lastClipLoadMs_ < 0 || (nowMs - lastClipLoadMs_) >= 1500) {
+			playNextRandomClip(nowMs, true);
+		}
+		break;
+	}
+
+	updateClipStatusUi();
+}
+
+void SwitcherDock::updateClipStatusUi()
+{
+	if (!clipStatusLabel_ || !clipMonitorLabel_)
+		return;
+
+	const size_t total = clipSelector_.clipCount();
+	if (!config_.clipPlayerEnabled) {
+		clipStatusLabel_->setText(
+			total > 0 ? QStringLiteral("Status: Disabled (%1 clips found)").arg(total)
+				  : QStringLiteral("Status: Disabled"));
+		clipMonitorLabel_->setVisible(false);
+		return;
+	}
+
+	QString statusText;
+	if (!lastClipError_.empty()) {
+		statusText = QStringLiteral("Error: %1")
+				     .arg(QString::fromStdString(lastClipError_));
+	} else if (config_.clipSourceName.empty()) {
+		statusText = QStringLiteral("Select or create a Clip Media Source");
+	} else if (config_.clipDirectory.empty()) {
+		statusText = QStringLiteral("Select a Clips Folder");
+	} else if (total == 0) {
+		statusText = QStringLiteral("No supported video clips found in folder");
+	} else if (!currentClipName_.empty() && wasClipTargetActive_) {
+		statusText = QStringLiteral("Playing: %1 (%2 clips)")
+				     .arg(QString::fromStdString(currentClipName_))
+				     .arg(total);
+	} else {
+		statusText = QStringLiteral("Ready: %1 clips queued (standby)").arg(total);
+	}
+
+	clipStatusLabel_->setText(QStringLiteral("Status: %1").arg(statusText));
+	clipMonitorLabel_->setText(QStringLiteral("Random Clips: %1").arg(statusText));
+	clipMonitorLabel_->setVisible(true);
+}
+
+void SwitcherDock::onBrowseClipDirClicked()
+{
+	const QString initialDir = clipDirEdit_->text().trimmed().isEmpty()
+					   ? QDir::homePath()
+					   : clipDirEdit_->text().trimmed();
+	const QString chosen = QFileDialog::getExistingDirectory(
+		this, QStringLiteral("Select Random Clips Folder"), initialDir);
+	if (chosen.isEmpty())
+		return;
+
+	clipDirEdit_->setText(chosen);
+	onUiConfigChanged();
+}
+
+void SwitcherDock::onCreateClipSourceClicked()
+{
+	if (obsExiting_)
+		return;
+
+	readConfigFromUi();
+	const std::string targetScene = !config_.fallbackSceneName.empty()
+						  ? config_.fallbackSceneName
+						  : currentObsSceneName();
+	if (targetScene.empty()) {
+		lastClipError_ = "Select a Fallback / BRB scene first";
+		updateClipStatusUi();
+		return;
+	}
+
+	std::string candidateName = "StreamBeast Random Clips";
+	for (int suffix = 2; suffix < 100; ++suffix) {
+		obs_source_t *existing = obs_get_source_by_name(candidateName.c_str());
+		if (!existing)
+			break;
+		obs_source_release(existing);
+		candidateName = "StreamBeast Random Clips " + std::to_string(suffix);
+	}
+
+	obs_scene_t *scene = obs_get_scene_by_name(targetScene.c_str());
+	if (!scene) {
+		lastClipError_ = "Target Fallback scene not found";
+		updateClipStatusUi();
+		return;
+	}
+
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_bool(settings, "is_local_file", true);
+	obs_data_set_bool(settings, "looping", false);
+	obs_data_set_bool(settings, "close_when_inactive", true);
+	obs_data_set_bool(settings, "restart_on_activate", false);
+
+	obs_source_t *src =
+		obs_source_create("ffmpeg_source", candidateName.c_str(), settings, nullptr);
+	obs_data_release(settings);
+
+	if (src) {
+		obs_sceneitem_t *item = obs_scene_add(scene, src);
+		if (item) {
+			struct obs_video_info ovi = {};
+			if (obs_get_video_info(&ovi) && ovi.base_width > 0 &&
+			    ovi.base_height > 0) {
+				struct vec2 bounds = {static_cast<float>(ovi.base_width),
+						      static_cast<float>(ovi.base_height)};
+				obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_SCALE_INNER);
+				obs_sceneitem_set_bounds_alignment(item, OBS_ALIGN_CENTER);
+				obs_sceneitem_set_bounds(item, &bounds);
+			}
+			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_BOTTOM);
+		}
+		obs_source_release(src);
+		config_.clipSourceName = candidateName;
+		config_.clipPlayerEnabled = true;
+		lastClipError_.clear();
+		obs_log(LOG_INFO, "Created BRB Clip Media Source '%s' in scene '%s'",
+			candidateName.c_str(), targetScene.c_str());
+	}
+	obs_scene_release(scene);
+
+	applyConfigToUi();
+	saveGlobalConfigFile();
+	if (obsReady_) {
+		onTick();
+	}
+}
+
+void SwitcherDock::onNextClipClicked()
+{
+	readConfigFromUi();
+	rescanClipDirectory();
+	if (playNextRandomClip(QDateTime::currentMSecsSinceEpoch(), true)) {
+		wasClipTargetActive_ = true;
+	}
+	updateClipStatusUi();
+}
+
+void SwitcherDock::onRescanClipsClicked()
+{
+	readConfigFromUi();
+	rescanClipDirectory();
+	lastClipError_.clear();
+	updateClipStatusUi();
+}
+
+void SwitcherDock::reconfigureObsRemoteClient()
+{
+	if (!obsReady_ || obsExiting_)
+		return;
+
+	obsRemoteClient_->configure(config_.obsRemoteEnabled,
+				    QString::fromStdString(config_.apiBaseUrl),
+				    QString::fromStdString(config_.obsRemoteToken));
+}
+
+void SwitcherDock::updateObsRemoteStatusUi()
+{
+	if (!obsRemoteStatusLabel_)
+		return;
+
+	if (!config_.obsRemoteEnabled) {
+		obsRemoteStatusLabel_->setText(QStringLiteral("Status: Disabled"));
+		return;
+	}
+	if (config_.obsRemoteToken.empty()) {
+		obsRemoteStatusLabel_->setText(
+			QStringLiteral("Status: Paste your OBS Overlay URL"));
+		return;
+	}
+	obsRemoteStatusLabel_->setText(
+		QStringLiteral("Status: %1").arg(QString::fromStdString(obsRemoteStatusText_)));
+}
+
+void SwitcherDock::pushObsRemoteState(int64_t nowMs)
+{
+	if (!obsReady_ || obsExiting_ || !obsRemoteClient_->isConfigured())
+		return;
+
+	lastRemotePushMs_ = nowMs;
+	obsRemoteClient_->pushState(buildObsRemoteStateSnapshot(nowMs));
+}
+
+QJsonObject SwitcherDock::buildObsRemoteStateSnapshot(int64_t nowMs)
+{
+	const bool streamActive = obs_frontend_streaming_active();
+	const bool recordActive = obs_frontend_recording_active();
+	const bool replayActive = obs_frontend_replay_buffer_active();
+	const std::string currentScene = currentObsSceneName();
+
+	if (streamActive && remoteStreamStartMs_ <= 0) {
+		remoteStreamStartMs_ = nowMs;
+	} else if (!streamActive) {
+		remoteStreamStartMs_ = 0;
+		remoteBitrateKbps_ = 0;
+		lastRemoteStreamBytes_ = 0;
+		lastRemoteStreamSampleMs_ = 0;
+	}
+
+	QJsonArray scenesArr;
+	char **sceneNames = obs_frontend_get_scene_names();
+	if (sceneNames) {
+		for (size_t i = 0; sceneNames[i] != nullptr; ++i) {
+			scenesArr.append(QString::fromUtf8(sceneNames[i]));
+		}
+		bfree(sceneNames);
+	}
+
+	QJsonArray sceneItemsArr;
+	if (!currentScene.empty()) {
+		obs_scene_t *scene = obs_get_scene_by_name(currentScene.c_str());
+		if (scene) {
+			std::vector<QJsonObject> items;
+			auto enumItems = [](obs_scene_t *, obs_sceneitem_t *item,
+					    void *param) -> bool {
+				auto *out = static_cast<std::vector<QJsonObject> *>(param);
+				obs_source_t *src = obs_sceneitem_get_source(item);
+				const char *name = src ? obs_source_get_name(src) : nullptr;
+				if (!name || !*name)
+					return true;
+
+				QJsonObject obj;
+				obj.insert(QStringLiteral("sceneItemId"),
+					   static_cast<qint64>(obs_sceneitem_get_id(item)));
+				obj.insert(QStringLiteral("sourceName"), QString::fromUtf8(name));
+				obj.insert(QStringLiteral("sceneItemEnabled"),
+					   obs_sceneitem_visible(item));
+				const char *kind = obs_source_get_unversioned_id(src);
+				obj.insert(QStringLiteral("inputKind"),
+					   kind ? QString::fromUtf8(kind) : QString());
+				out->push_back(std::move(obj));
+				return true;
+			};
+			obs_scene_enum_items(scene, enumItems, &items);
+			obs_scene_release(scene);
+
+			for (auto it = items.rbegin(); it != items.rend(); ++it) {
+				sceneItemsArr.append(*it);
+			}
+		}
+	}
+
+	struct AudioRow {
+		QString name;
+		bool muted = false;
+		double mul = 1.0;
+		double db = 0.0;
+	};
+	std::vector<AudioRow> audioRows;
+	auto enumAudio = [](void *param, obs_source_t *source) -> bool {
+		if (obs_source_get_type(source) != OBS_SOURCE_TYPE_INPUT)
+			return true;
+		if ((obs_source_get_output_flags(source) & OBS_SOURCE_AUDIO) == 0)
+			return true;
+		const char *name = obs_source_get_name(source);
+		if (!name || !*name)
+			return true;
+
+		const float mul = obs_source_get_volume(source);
+		const double db =
+			(mul > 0.0f) ? (20.0 * std::log10(static_cast<double>(mul))) : -100.0;
+		auto *out = static_cast<std::vector<AudioRow> *>(param);
+		out->push_back(AudioRow{QString::fromUtf8(name), obs_source_muted(source),
+					static_cast<double>(mul), db});
+		return true;
+	};
+	obs_enum_sources(enumAudio, &audioRows);
+	std::sort(audioRows.begin(), audioRows.end(),
+		  [](const AudioRow &a, const AudioRow &b) {
+			  return QString::localeAwareCompare(a.name, b.name) < 0;
+		  });
+
+	QJsonArray audioArr;
+	for (const auto &row : audioRows) {
+		QJsonObject obj;
+		obj.insert(QStringLiteral("inputName"), row.name);
+		obj.insert(QStringLiteral("inputMuted"), row.muted);
+		obj.insert(QStringLiteral("inputVolumeMul"), row.mul);
+		obj.insert(QStringLiteral("inputVolumeDb"), row.db);
+		audioArr.append(obj);
+	}
+
+	uint64_t outputBytes = 0;
+	int outputSkippedFrames = 0;
+	int outputTotalFrames = 0;
+	double outputCongestion = 0.0;
+	int64_t outputDuration =
+		(streamActive && remoteStreamStartMs_ > 0) ? (nowMs - remoteStreamStartMs_) : 0;
+
+	if (streamActive) {
+		obs_output_t *streamOut = obs_frontend_get_streaming_output();
+		if (streamOut) {
+			outputBytes = obs_output_get_total_bytes(streamOut);
+			outputSkippedFrames = obs_output_get_frames_dropped(streamOut);
+			outputTotalFrames = obs_output_get_total_frames(streamOut);
+			outputCongestion = static_cast<double>(obs_output_get_congestion(streamOut));
+			obs_output_release(streamOut);
+
+			if (lastRemoteStreamSampleMs_ > 0 &&
+			    outputBytes >= lastRemoteStreamBytes_) {
+				const double dtSec =
+					static_cast<double>(nowMs - lastRemoteStreamSampleMs_) /
+					1000.0;
+				if (dtSec > 0.2) {
+					remoteBitrateKbps_ = static_cast<int>(std::lround(
+						static_cast<double>(outputBytes -
+								    lastRemoteStreamBytes_) *
+						8.0 / dtSec / 1000.0));
+				}
+			}
+			lastRemoteStreamBytes_ = outputBytes;
+			lastRemoteStreamSampleMs_ = nowMs;
+		}
+	}
+
+	QJsonObject statsObj;
+	statsObj.insert(QStringLiteral("bitrateKbps"), remoteBitrateKbps_);
+	statsObj.insert(QStringLiteral("outputSkippedFrames"), outputSkippedFrames);
+	statsObj.insert(QStringLiteral("outputTotalFrames"), outputTotalFrames);
+	statsObj.insert(QStringLiteral("renderSkippedFrames"),
+			static_cast<int>(obs_get_lagged_frames()));
+	statsObj.insert(QStringLiteral("renderTotalFrames"),
+			static_cast<int>(obs_get_total_frames()));
+	statsObj.insert(QStringLiteral("activeFps"), obs_get_active_fps());
+	statsObj.insert(QStringLiteral("cpuUsage"),
+			cpuUsageInfo_ ? os_cpu_usage_info_query(cpuUsageInfo_) : 0.0);
+	statsObj.insert(QStringLiteral("memoryUsage"),
+			static_cast<double>(os_get_proc_resident_size()) / (1024.0 * 1024.0));
+	statsObj.insert(QStringLiteral("outputCongestion"), outputCongestion);
+	statsObj.insert(QStringLiteral("outputDuration"), static_cast<qint64>(outputDuration));
+	statsObj.insert(QStringLiteral("outputBytes"), static_cast<qint64>(outputBytes));
+
+	const char *obsVer = obs_get_version_string();
+
+	QJsonObject root;
+	root.insert(QStringLiteral("obsConnected"), true);
+	root.insert(QStringLiteral("obsVersion"),
+		    obsVer ? QString::fromUtf8(obsVer) : QString());
+	root.insert(QStringLiteral("streamActive"), streamActive);
+	root.insert(QStringLiteral("recordActive"), recordActive);
+	root.insert(QStringLiteral("replayBufferActive"), replayActive);
+	root.insert(QStringLiteral("currentScene"), QString::fromStdString(currentScene));
+	root.insert(QStringLiteral("scenes"), scenesArr);
+	root.insert(QStringLiteral("sceneItems"), sceneItemsArr);
+	root.insert(QStringLiteral("audioInputs"), audioArr);
+	root.insert(QStringLiteral("stats"), statsObj);
+	root.insert(QStringLiteral("lastError"), QJsonValue::Null);
+	return root;
+}
+
+void SwitcherDock::onTestObsRemoteClicked()
+{
+	readConfigFromUi();
+	if (config_.obsRemoteToken.empty()) {
+		obsRemoteTestLabel_->setText(
+			QStringLiteral("Paste your OBS Overlay URL first."));
+		return;
+	}
+
+	testObsRemoteBtn_->setEnabled(false);
+	obsRemoteTestLabel_->setText(QStringLiteral("Testing..."));
+	obsRemoteClient_->testToken(QString::fromStdString(config_.apiBaseUrl),
+				    QString::fromStdString(config_.obsRemoteToken));
+}
+
+void SwitcherDock::onObsRemoteConnectionChanged(bool connected, const QString &statusText)
+{
+	obsRemoteStatusText_ = statusText.toStdString();
+	updateObsRemoteStatusUi();
+
+	if (connected && obsReady_ && !obsExiting_) {
+		pushObsRemoteState(QDateTime::currentMSecsSinceEpoch());
+	}
+}
+
+void SwitcherDock::onObsRemoteTokenTested(bool ok, const QString &message)
+{
+	(void)ok;
+	testObsRemoteBtn_->setEnabled(true);
+	obsRemoteTestLabel_->setText(message);
+}
+
+void SwitcherDock::onObsRemoteCommandReceived(const QString &requestType,
+					      const QJsonObject &requestData)
+{
+	if (!obsReady_ || obsExiting_)
+		return;
+
+	obs_log(LOG_INFO, "OBS Remote command: %s", requestType.toUtf8().constData());
+
+	if (requestType == QStringLiteral("StartStream")) {
+		if (!obs_frontend_streaming_active())
+			obs_frontend_streaming_start();
+	} else if (requestType == QStringLiteral("StopStream")) {
+		if (obs_frontend_streaming_active())
+			obs_frontend_streaming_stop();
+	} else if (requestType == QStringLiteral("StartRecord")) {
+		if (!obs_frontend_recording_active())
+			obs_frontend_recording_start();
+	} else if (requestType == QStringLiteral("StopRecord")) {
+		if (obs_frontend_recording_active())
+			obs_frontend_recording_stop();
+	} else if (requestType == QStringLiteral("StartReplayBuffer")) {
+		if (!obs_frontend_replay_buffer_active())
+			obs_frontend_replay_buffer_start();
+	} else if (requestType == QStringLiteral("StopReplayBuffer")) {
+		if (obs_frontend_replay_buffer_active())
+			obs_frontend_replay_buffer_stop();
+	} else if (requestType == QStringLiteral("SaveReplayBuffer")) {
+		if (obs_frontend_replay_buffer_active())
+			obs_frontend_replay_buffer_save();
+	} else if (requestType == QStringLiteral("SetCurrentProgramScene")) {
+		const std::string sceneName =
+			requestData.value(QStringLiteral("sceneName")).toString().toStdString();
+		switchObsScene(sceneName);
+	} else if (requestType == QStringLiteral("SetSceneItemEnabled")) {
+		const std::string sceneName =
+			requestData.value(QStringLiteral("sceneName")).toString().toStdString();
+		const int64_t itemId =
+			requestData.value(QStringLiteral("sceneItemId")).toInteger(-1);
+		const bool enabled =
+			requestData.value(QStringLiteral("sceneItemEnabled")).toBool(true);
+		const std::string targetScene =
+			sceneName.empty() ? currentObsSceneName() : sceneName;
+		if (!targetScene.empty() && itemId >= 0) {
+			obs_scene_t *scene = obs_get_scene_by_name(targetScene.c_str());
+			if (scene) {
+				obs_sceneitem_t *item =
+					obs_scene_find_sceneitem_by_id(scene, itemId);
+				if (item) {
+					obs_sceneitem_set_visible(item, enabled);
+				}
+				obs_scene_release(scene);
+			}
+		}
+	} else if (requestType == QStringLiteral("SetInputMute")) {
+		const std::string inputName =
+			requestData.value(QStringLiteral("inputName")).toString().toStdString();
+		const bool muted = requestData.value(QStringLiteral("inputMuted")).toBool(false);
+		if (!inputName.empty()) {
+			obs_source_t *src = obs_get_source_by_name(inputName.c_str());
+			if (src) {
+				obs_source_set_muted(src, muted);
+				obs_source_release(src);
+			}
+		}
+	} else if (requestType == QStringLiteral("SetInputVolume")) {
+		const std::string inputName =
+			requestData.value(QStringLiteral("inputName")).toString().toStdString();
+		if (!inputName.empty()) {
+			double mul = -1.0;
+			if (requestData.contains(QStringLiteral("inputVolumeMul"))) {
+				mul = requestData.value(QStringLiteral("inputVolumeMul"))
+					      .toDouble(-1.0);
+			} else if (requestData.contains(QStringLiteral("inputVolumeDb"))) {
+				const double db =
+					requestData.value(QStringLiteral("inputVolumeDb"))
+						.toDouble(-100.0);
+				mul = (db <= -99.0) ? 0.0 : std::pow(10.0, db / 20.0);
+			}
+			if (mul >= 0.0) {
+				obs_source_t *src = obs_get_source_by_name(inputName.c_str());
+				if (src) {
+					obs_source_set_volume(
+						src, static_cast<float>(std::clamp(mul, 0.0, 20.0)));
+					obs_source_release(src);
+				}
+			}
+		}
+	}
+
+	// Push refreshed OBS state back shortly after executing the command
+	QTimer::singleShot(120, this, [this]() {
+		if (obsReady_ && !obsExiting_ && obsRemoteClient_->isConfigured()) {
+			pushObsRemoteState(QDateTime::currentMSecsSinceEpoch());
+		}
+	});
 }
 
 } // namespace streambeast

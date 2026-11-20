@@ -1,5 +1,5 @@
 /*
-StreamBeast SRT Switcher - Core Unit Tests
+StreamBeast IRL - Core Unit Tests
 Copyright (C) 2026 StreamBeast (https://streambeast.app)
 
 This program is free software; you can redistribute it and/or modify
@@ -8,11 +8,15 @@ the Free Software Foundation; either version 2 of the License, or
 (at your option) any later version.
 */
 
+#include "clip-player.hpp"
+#include "obs-remote-core.hpp"
 #include "switcher-core.hpp"
 
 #include <cassert>
 #include <iostream>
+#include <set>
 #include <string>
+#include <vector>
 
 using namespace streambeast;
 
@@ -220,12 +224,99 @@ static void test_safety_guards_and_local_only_mode()
 	assert(d.healthBadge == "LIVE");
 }
 
+static void test_random_clip_selector()
+{
+	assert(isSupportedVideoExtension("clip.mp4"));
+	assert(isSupportedVideoExtension("C:\\Videos\\BRB\\Highlight.MKV"));
+	assert(isSupportedVideoExtension("/home/user/clips/test.mov"));
+	assert(isSupportedVideoExtension("/home/user/clips/test.webm"));
+	assert(!isSupportedVideoExtension("notes.txt"));
+	assert(!isSupportedVideoExtension("folder.mp4/readme"));
+	assert(!isSupportedVideoExtension("noextension"));
+
+	RandomClipSelector emptySelector(42);
+	assert(emptySelector.pickNext(true).empty());
+	assert(emptySelector.pickNext(false).empty());
+
+	RandomClipSelector singleSelector(42);
+	singleSelector.setClips({"only.mp4"});
+	assert(singleSelector.clipCount() == 1);
+	assert(singleSelector.pickNext(true) == "only.mp4");
+	assert(singleSelector.pickNext(true) == "only.mp4");
+
+	// Shuffle-bag mode: plays every clip once per round and never repeats back-to-back
+	RandomClipSelector bagSelector(12345);
+	const std::vector<std::string> clips = {"a.mp4", "b.mp4", "c.mp4", "d.mp4"};
+	bagSelector.setClips(clips);
+	assert(bagSelector.clipCount() == 4);
+
+	std::string prev;
+	for (int round = 0; round < 5; ++round) {
+		std::set<std::string> seenInRound;
+		for (size_t i = 0; i < clips.size(); ++i) {
+			const std::string picked = bagSelector.pickNext(true);
+			assert(!picked.empty());
+			assert(picked != prev);
+			seenInRound.insert(picked);
+			prev = picked;
+		}
+		assert(seenInRound.size() == clips.size());
+	}
+
+	// Updating clips preserves remaining unplayed clips and avoids repeating prev
+	const std::string prevBeforeUpdate = bagSelector.pickNext(true);
+	bagSelector.setClips({"a.mp4", "b.mp4", "c.mp4", "d.mp4", "e.mp4"});
+	assert(bagSelector.clipCount() == 5);
+	const std::string nextAfterUpdate = bagSelector.pickNext(true);
+	assert(!nextAfterUpdate.empty());
+	assert(nextAfterUpdate != prevBeforeUpdate);
+
+	// Pure random mode: still avoids immediate repeats when >1 clip exists
+	RandomClipSelector randSelector(999);
+	randSelector.setClips(clips);
+	prev.clear();
+	for (int i = 0; i < 30; ++i) {
+		const std::string picked = randSelector.pickNext(false);
+		assert(!picked.empty());
+		assert(picked != prev);
+		prev = picked;
+	}
+}
+
+static void test_obs_remote_token_and_sse()
+{
+	const std::string sampleToken = "a1b2c3d4e5f60718293a4b5c6d7e8f901122334455667788";
+	assert(extractObsRemoteToken(sampleToken) == sampleToken);
+	assert(extractObsRemoteToken("  https://streambeast.app/overlay/obs-remote?token=" +
+				     sampleToken + "  ") == sampleToken);
+	assert(extractObsRemoteToken("https://streambeast.app/overlay/obs-remote?foo=1&token=" +
+				     sampleToken + "#hash") == sampleToken);
+	assert(extractObsRemoteToken("too_short").empty());
+
+	// Incremental SSE parsing across chunk boundaries
+	SseEventParser parser;
+	assert(parser.feed(": ping 12345\n\n").empty());
+
+	auto ev1 = parser.feed("event: ready\ndata: {\"ok\":true}\n\nevent: obs_com");
+	assert(ev1.size() == 1);
+	assert(ev1[0].event == "ready");
+	assert(ev1[0].data == "{\"ok\":true}");
+
+	auto ev2 = parser.feed(
+		"mand\r\ndata: {\"requestType\":\"StartStream\",\"requestData\":{}}\r\n\r\n");
+	assert(ev2.size() == 1);
+	assert(ev2[0].event == "obs_command");
+	assert(ev2[0].data == "{\"requestType\":\"StartStream\",\"requestData\":{}}");
+}
+
 int main()
 {
 	test_url_and_key_extraction();
 	test_drop_debounce_and_recovery();
 	test_low_bitrate_and_hysteresis();
 	test_safety_guards_and_local_only_mode();
-	std::cout << "All StreamBeast SRT Switcher core tests passed!\n";
+	test_random_clip_selector();
+	test_obs_remote_token_and_sse();
+	std::cout << "All StreamBeast IRL core tests passed!\n";
 	return 0;
 }

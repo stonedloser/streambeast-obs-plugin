@@ -1,5 +1,5 @@
 /*
-StreamBeast SRT Switcher
+StreamBeast IRL
 Copyright (C) 2026 StreamBeast (https://streambeast.app)
 
 This program is free software; you can redistribute it and/or modify
@@ -55,6 +55,16 @@ struct SwitcherConfig {
 	int lowBitrateRecoverHysteresisKbps = 250;
 	int apiPollIntervalMs = 2500;
 	int mediaRestartCooldownMs = 6000;
+
+	bool clipPlayerEnabled = false;
+	std::string clipSourceName;
+	std::string clipDirectory;
+	bool clipShuffleNoRepeat = true;
+	bool clipIncludeSubfolders = false;
+	bool clipOnlyOnFallbackScene = true;
+
+	bool obsRemoteEnabled = false;
+	std::string obsRemoteToken;
 };
 
 struct SignalSnapshot {

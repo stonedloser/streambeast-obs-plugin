@@ -1,5 +1,5 @@
 /*
-StreamBeast SRT Switcher
+StreamBeast IRL
 Copyright (C) 2026 StreamBeast (https://streambeast.app)
 
 This program is free software; you can redistribute it and/or modify

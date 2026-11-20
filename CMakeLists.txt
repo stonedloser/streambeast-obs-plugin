@@ -7,7 +7,7 @@ if(BUILD_PLUGIN)
   include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
   project(${_name} VERSION ${_version})
 else()
-  project(streambeast-srt-switcher-tests VERSION 1.0.0 LANGUAGES CXX)
+  project(streambeast-srt-switcher-tests VERSION 1.2.0 LANGUAGES CXX)
 endif()
 
 option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
@@ -15,7 +15,13 @@ option(ENABLE_QT "Use Qt functionality" ON)
 
 if(BUILD_TESTS)
   enable_testing()
-  add_executable(test_switcher_core tests/test_switcher_core.cpp src/switcher-core.cpp)
+  add_executable(
+    test_switcher_core
+    tests/test_switcher_core.cpp
+    src/switcher-core.cpp
+    src/clip-player.cpp
+    src/obs-remote-core.cpp
+  )
   target_include_directories(test_switcher_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_compile_features(test_switcher_core PRIVATE cxx_std_17)
   if(MSVC)
@@ -60,6 +66,12 @@ if(BUILD_PLUGIN)
       src/plugin-main.cpp
       src/switcher-core.cpp
       src/switcher-core.hpp
+      src/clip-player.cpp
+      src/clip-player.hpp
+      src/obs-remote-core.cpp
+      src/obs-remote-core.hpp
+      src/obs-remote-client.cpp
+      src/obs-remote-client.hpp
       src/streambeast-api.cpp
       src/streambeast-api.hpp
       src/switcher-dock.cpp

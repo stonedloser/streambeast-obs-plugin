@@ -1,4 +1,4 @@
-# StreamBeast SRT Switcher (OBS Studio Plugin)
+# StreamBeast IRL (OBS Studio Plugin)
 
 A native C++/Qt6 OBS Studio plugin built exclusively for the **[StreamBeast](https://streambeast.app) OBS Bridge** (`srt://srt.streambeast.app:8890?streamid=read:<key>`).
 
@@ -28,9 +28,15 @@ It monitors your StreamBeast IRL SRT feed inside OBS Studio and automatically sw
   - **Low-Bitrate Scene (Optional):** Switches to a low-signal warning scene when StreamBeast reports bitrate below your threshold, with a recovery buffer (hysteresis) to avoid rapid back-and-forth switching.
   - **Auto-Restart Stuck Media Source:** Automatically restarts your `ffmpeg_source` on a configurable cooldown if OBS stalls after a drop.
 - **Streamer Safety Guards**
-  - One-click **Auto-Switching ON/OFF** toggle in the OBS dock (`View → Docks → StreamBeast SRT Switcher`).
+  - One-click **Auto-Switching ON/OFF** toggle in the OBS dock (`View → Docks → StreamBeast IRL`).
   - Optional **"Only auto-switch while Streaming or Recording"**.
   - Optional **"Only switch when on Live / Fallback / Low-Bitrate scenes"** so manual scenes (Intro, Outro, Desktop) are never interrupted.
+- **Random Clips Player (Fallback / BRB)**
+  - Automatically plays random video clips (`.mp4`, `.mkv`, `.mov`, `.webm`, `.flv`, `.ts`, `.avi`, and more) from a chosen directory on your **Fallback / BRB** scene when disconnected.
+  - Shuffle-without-repeat mode cycles through every clip before repeating and avoids back-to-back repeats, plus a one-click **Create** button to add a configured Media Source directly to your Fallback scene.
+- **Native OBS Remote Bridge**
+  - Connect directly to **[StreamBeast OBS Remote](https://streambeast.app/tools/obs-remote)** by pasting your OBS Overlay URL — no Browser Source overlay or OBS WebSocket password required.
+  - Remotely switch scenes, start/stop streaming, recording, and replay buffer, toggle scene item visibility, adjust audio mixer mute/volume, and stream live OBS telemetry.
 
 ---
 
@@ -45,11 +51,15 @@ It monitors your StreamBeast IRL SRT feed inside OBS Studio and automatically sw
 
 1. Download the latest installer or archive for your OS from [Releases](../../releases) (or build from source below).
 2. In OBS Studio, add a **Media Source** using your StreamBeast OBS Bridge SRT URL (`srt://srt.streambeast.app:8890?streamid=read:<key>`).
-3. Open the plugin dock via **View → Docks → StreamBeast SRT Switcher** (or **Tools → StreamBeast SRT Switcher...**).
-4. In the **Monitor** tab:
+3. Open the plugin dock via **View → Docks → StreamBeast IRL** (or **Tools → StreamBeast IRL...**).
+4. In the **Auto Scene** tab:
    - Select your **SRT Media Source** (StreamBeast sources are labeled `[StreamBeast SRT]`).
    - Select your **Live Scene**, **Fallback / BRB** scene, and optionally a **Low-Bitrate Scene**.
-5. In the **Settings** tab, adjust timings, low-bitrate thresholds, safety guards, or click **Test Connection** to verify communication with `streambeast.app`.
+   - Scroll down in the **Auto Scene** tab to adjust detection timings, low-bitrate thresholds, safety guards, or click **Test Connection** to verify communication with `streambeast.app`.
+5. *(Optional)* In the **Random Clips** tab:
+   - Select an existing **Clip Media Source** on your Fallback scene (or click **Create** to add one automatically), **Browse...** to choose your clips folder, and toggle **Random Clips: ON**.
+6. *(Optional)* In the **OBS Remote** tab:
+   - Paste your OBS Overlay URL from `streambeast.app/tools/obs-remote` and toggle **OBS Remote: ON**.
 
 ---
 
@@ -57,7 +67,9 @@ It monitors your StreamBeast IRL SRT feed inside OBS Studio and automatically sw
 
 This repository contains the complete plugin source code so anyone can inspect how it operates:
 
-- **External Network Requests:** When StreamBeast API monitoring is enabled, the only outbound request made by the plugin is `POST https://streambeast.app/api/srt/plugin-status` with JSON payload `{"streamKey":"<key>"}` (3-second timeout via Qt Network).
+- **External Network Requests:**
+  - When StreamBeast API monitoring is enabled: `POST https://streambeast.app/api/srt/plugin-status` with JSON `{"streamKey":"<key>"}` (3-second timeout).
+  - When **OBS Remote** is enabled: persistent SSE stream `GET https://streambeast.app/api/obs-remote/overlay/events?token=<token>` and state updates `POST https://streambeast.app/api/obs-remote/overlay/state`.
 - **Local Persistence:** Plugin configuration is stored locally in OBS scene collection data and the OBS plugin config directory (`config.json`). No data is sent to any third party.
 
 ---
