@@ -1284,7 +1284,8 @@ void SwitcherDock::onTick()
 	snap.apiBitrateKbps = apiSnap.bitrateKbps;
 	snap.apiQuality = apiSnap.quality.toStdString();
 
-	const SwitcherDecision decision = engine_.evaluate(snap, config_);
+	lastDecision_ = engine_.evaluate(snap, config_);
+	const SwitcherDecision &decision = lastDecision_;
 
 	if (decision.requestMediaRestart) {
 		restartObsMediaSource();
@@ -1664,36 +1665,44 @@ void SwitcherDock::updateClipPlayer(int64_t nowMs, const std::string &currentSce
 	updateClipStatusUi();
 }
 
+QString SwitcherDock::formatClipStatusText() const
+{
+	const size_t total = clipSelector_.clipCount();
+	if (!config_.clipPlayerEnabled) {
+		return total > 0 ? QStringLiteral("Disabled (%1 clips found)").arg(total)
+				 : QStringLiteral("Disabled");
+	}
+
+	if (!lastClipError_.empty()) {
+		return QStringLiteral("Error: %1").arg(QString::fromStdString(lastClipError_));
+	}
+	if (config_.clipSourceName.empty()) {
+		return QStringLiteral("Select or create a Clip Media Source");
+	}
+	if (config_.clipDirectory.empty()) {
+		return QStringLiteral("Select a Clips Folder");
+	}
+	if (total == 0) {
+		return QStringLiteral("No supported video clips found in folder");
+	}
+	if (!currentClipName_.empty() && wasClipTargetActive_) {
+		return QStringLiteral("Playing: %1 (%2 clips)")
+			.arg(QString::fromStdString(currentClipName_))
+			.arg(total);
+	}
+	return QStringLiteral("Ready: %1 clips queued (standby)").arg(total);
+}
+
 void SwitcherDock::updateClipStatusUi()
 {
 	if (!clipStatusLabel_ || !clipMonitorLabel_)
 		return;
 
-	const size_t total = clipSelector_.clipCount();
+	const QString statusText = formatClipStatusText();
 	if (!config_.clipPlayerEnabled) {
-		clipStatusLabel_->setText(
-			total > 0 ? QStringLiteral("Status: Disabled (%1 clips found)").arg(total)
-				  : QStringLiteral("Status: Disabled"));
+		clipStatusLabel_->setText(QStringLiteral("Status: %1").arg(statusText));
 		clipMonitorLabel_->setVisible(false);
 		return;
-	}
-
-	QString statusText;
-	if (!lastClipError_.empty()) {
-		statusText = QStringLiteral("Error: %1")
-				     .arg(QString::fromStdString(lastClipError_));
-	} else if (config_.clipSourceName.empty()) {
-		statusText = QStringLiteral("Select or create a Clip Media Source");
-	} else if (config_.clipDirectory.empty()) {
-		statusText = QStringLiteral("Select a Clips Folder");
-	} else if (total == 0) {
-		statusText = QStringLiteral("No supported video clips found in folder");
-	} else if (!currentClipName_.empty() && wasClipTargetActive_) {
-		statusText = QStringLiteral("Playing: %1 (%2 clips)")
-				     .arg(QString::fromStdString(currentClipName_))
-				     .arg(total);
-	} else {
-		statusText = QStringLiteral("Ready: %1 clips queued (standby)").arg(total);
 	}
 
 	clipStatusLabel_->setText(QStringLiteral("Status: %1").arg(statusText));
@@ -1992,6 +2001,51 @@ QJsonObject SwitcherDock::buildObsRemoteStateSnapshot(int64_t nowMs)
 
 	const char *obsVer = obs_get_version_string();
 
+	QJsonObject autoSwitcherObj;
+	autoSwitcherObj.insert(QStringLiteral("enabled"), config_.enabled);
+	autoSwitcherObj.insert(QStringLiteral("badge"),
+			       QString::fromStdString(lastDecision_.healthBadge));
+	autoSwitcherObj.insert(QStringLiteral("summary"),
+			       QString::fromStdString(lastDecision_.statusSummary));
+	autoSwitcherObj.insert(QStringLiteral("mediaSourceName"),
+			       QString::fromStdString(config_.mediaSourceName));
+	autoSwitcherObj.insert(QStringLiteral("liveSceneName"),
+			       QString::fromStdString(config_.liveSceneName));
+	autoSwitcherObj.insert(QStringLiteral("fallbackSceneName"),
+			       QString::fromStdString(config_.fallbackSceneName));
+	autoSwitcherObj.insert(QStringLiteral("lowBitrateSceneName"),
+			       QString::fromStdString(config_.lowBitrateSceneName));
+	autoSwitcherObj.insert(QStringLiteral("onlyWhenStreamingOrRecording"),
+			       config_.onlyWhenStreamingOrRecording);
+	autoSwitcherObj.insert(QStringLiteral("onlySwitchManagedScenes"),
+			       config_.onlySwitchManagedScenes);
+	autoSwitcherObj.insert(QStringLiteral("autoReturnToLive"), config_.autoReturnToLive);
+	autoSwitcherObj.insert(QStringLiteral("autoRestartMediaSource"),
+			       config_.autoRestartMediaSource);
+
+	QJsonObject clipPlayerObj;
+	clipPlayerObj.insert(QStringLiteral("enabled"), config_.clipPlayerEnabled);
+	clipPlayerObj.insert(QStringLiteral("playing"),
+			     config_.clipPlayerEnabled && !currentClipName_.empty() &&
+				     wasClipTargetActive_);
+	clipPlayerObj.insert(QStringLiteral("status"), formatClipStatusText());
+	clipPlayerObj.insert(QStringLiteral("currentClip"),
+			     QString::fromStdString(currentClipName_));
+	clipPlayerObj.insert(QStringLiteral("clipCount"),
+			     static_cast<qint64>(clipSelector_.clipCount()));
+	clipPlayerObj.insert(QStringLiteral("clipSourceName"),
+			     QString::fromStdString(config_.clipSourceName));
+	clipPlayerObj.insert(QStringLiteral("clipDirectory"),
+			     QString::fromStdString(config_.clipDirectory));
+	clipPlayerObj.insert(QStringLiteral("shuffleNoRepeat"), config_.clipShuffleNoRepeat);
+	clipPlayerObj.insert(QStringLiteral("includeSubfolders"), config_.clipIncludeSubfolders);
+	clipPlayerObj.insert(QStringLiteral("onlyOnFallbackScene"),
+			     config_.clipOnlyOnFallbackScene);
+	clipPlayerObj.insert(QStringLiteral("lastError"),
+			     lastClipError_.empty()
+				     ? QJsonValue(QJsonValue::Null)
+				     : QJsonValue(QString::fromStdString(lastClipError_)));
+
 	QJsonObject root;
 	root.insert(QStringLiteral("obsConnected"), true);
 	root.insert(QStringLiteral("obsVersion"),
@@ -2004,6 +2058,8 @@ QJsonObject SwitcherDock::buildObsRemoteStateSnapshot(int64_t nowMs)
 	root.insert(QStringLiteral("sceneItems"), sceneItemsArr);
 	root.insert(QStringLiteral("audioInputs"), audioArr);
 	root.insert(QStringLiteral("stats"), statsObj);
+	root.insert(QStringLiteral("autoSceneSwitcher"), autoSwitcherObj);
+	root.insert(QStringLiteral("randomClipsPlayer"), clipPlayerObj);
 	root.insert(QStringLiteral("lastError"), QJsonValue::Null);
 	return root;
 }
@@ -2127,6 +2183,54 @@ void SwitcherDock::onObsRemoteCommandReceived(const QString &requestType,
 				}
 			}
 		}
+	} else if (requestType == QStringLiteral("SetAutoSceneSwitcherEnabled")) {
+		const bool enabled = requestData.contains(QStringLiteral("enabled"))
+					     ? requestData.value(QStringLiteral("enabled"))
+						       .toBool(!config_.enabled)
+					     : !config_.enabled;
+		config_.enabled = enabled;
+		if (enableToggleBtn_) {
+			QSignalBlocker b(enableToggleBtn_);
+			enableToggleBtn_->setChecked(enabled);
+			enableToggleBtn_->setText(enabled ? QStringLiteral("Auto-Switching: ON")
+							  : QStringLiteral("Auto-Switching: OFF"));
+		}
+		engine_.reset();
+		saveGlobalConfigFile();
+		onTick();
+	} else if (requestType == QStringLiteral("RestartSrtSource")) {
+		restartObsMediaSource();
+	} else if (requestType == QStringLiteral("SwitchToLiveScene")) {
+		if (!config_.liveSceneName.empty()) {
+			switchObsScene(config_.liveSceneName);
+			engine_.reset();
+			onTick();
+		}
+	} else if (requestType == QStringLiteral("SwitchToFallbackScene")) {
+		if (!config_.fallbackSceneName.empty()) {
+			switchObsScene(config_.fallbackSceneName);
+			engine_.reset();
+			onTick();
+		}
+	} else if (requestType == QStringLiteral("SetRandomClipsEnabled")) {
+		const bool enabled = requestData.contains(QStringLiteral("enabled"))
+					     ? requestData.value(QStringLiteral("enabled"))
+						       .toBool(!config_.clipPlayerEnabled)
+					     : !config_.clipPlayerEnabled;
+		config_.clipPlayerEnabled = enabled;
+		if (clipEnabledToggleBtn_) {
+			QSignalBlocker b(clipEnabledToggleBtn_);
+			clipEnabledToggleBtn_->setChecked(enabled);
+			clipEnabledToggleBtn_->setText(
+				enabled ? QStringLiteral("Random Clips: ON")
+					: QStringLiteral("Random Clips: OFF"));
+		}
+		saveGlobalConfigFile();
+		onTick();
+	} else if (requestType == QStringLiteral("PlayNextRandomClip")) {
+		onNextClipClicked();
+	} else if (requestType == QStringLiteral("RescanRandomClips")) {
+		onRescanClipsClicked();
 	}
 
 	// Push refreshed OBS state back shortly after executing the command

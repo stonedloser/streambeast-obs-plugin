@@ -98,6 +98,7 @@ private:
 	bool playNextRandomClip(int64_t nowMs, bool forcePlay);
 	void stopClipMediaSource();
 	void updateClipPlayer(int64_t nowMs, const std::string &currentSceneName);
+	QString formatClipStatusText() const;
 	void updateClipStatusUi();
 
 	void reconfigureObsRemoteClient();
@@ -107,6 +108,7 @@ private:
 
 	SwitcherConfig config_;
 	SrtSwitcherEngine engine_;
+	SwitcherDecision lastDecision_;
 	RandomClipSelector clipSelector_;
 	StreamBeastApiClient *apiClient_ = nullptr;
 	ObsRemoteClient *obsRemoteClient_ = nullptr;
